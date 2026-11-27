@@ -149,6 +149,9 @@ pub struct FieldValidation {
     pub multiple: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_types: Vec<String>,
+    /// Optional conditional visibility rule (e.g. `{ "visible": { "field": "kind", "eq": "tutorial" } }`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conditions: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]

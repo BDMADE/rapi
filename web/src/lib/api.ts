@@ -173,6 +173,13 @@ export interface FieldValidation {
   targetField?: string;
   multiple?: boolean;
   allowedTypes?: string[];
+  conditions?: {
+    visible?: {
+      field: string;
+      eq?: unknown;
+      ne?: unknown;
+    };
+  };
 }
 
 export interface RelationConfig {

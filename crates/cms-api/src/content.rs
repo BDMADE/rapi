@@ -131,16 +131,18 @@ async fn rest_find_or_single_handler(
             )
             .await?
             .ok_or_else(|| ApiError::NotFound(format!("Single type '{slug}' has no published document")))?;
-        return Ok(Json(serde_json::to_value(ApiResponse::new(doc)).unwrap()));
+        let value = serde_json::to_value(ApiResponse::new(doc))
+            .map_err(|e| HttpApiError(ApiError::Internal(format!("serialize response: {e}"))))?;
+        return Ok(Json(value));
     }
 
     let (items, pagination) = services
         .content
         .find_many_public(&schema, &doc_query)
         .await?;
-    Ok(Json(
-        serde_json::to_value(ApiResponse::with_pagination(items, pagination)).unwrap(),
-    ))
+    let value = serde_json::to_value(ApiResponse::with_pagination(items, pagination))
+        .map_err(|e| HttpApiError(ApiError::Internal(format!("serialize response: {e}"))))?;
+    Ok(Json(value))
 }
 
 async fn rest_find_one_handler(

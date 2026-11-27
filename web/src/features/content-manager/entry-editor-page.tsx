@@ -34,6 +34,54 @@ import {
 import { RelationPicker } from "@/features/content-manager/relation-picker";
 import { api, type ContentTypeSchema, type FieldDefinition } from "@/lib/api";
 
+function isFieldVisible(field: FieldDefinition, values: Record<string, unknown>): boolean {
+  const rule = field.validation?.conditions?.visible;
+  if (!rule || !rule.field) return true;
+  const current = values[rule.field];
+  if (rule.eq !== undefined) return current === rule.eq;
+  if (rule.ne !== undefined) return current !== rule.ne;
+  return true;
+}
+
+function JsonFieldEditor({
+  value,
+  onChange,
+}: {
+  value: unknown;
+  onChange: (val: unknown) => void;
+}) {
+  const [text, setText] = useState(() =>
+    value !== undefined && value !== null ? JSON.stringify(value, null, 2) : "{}",
+  );
+  const [parseError, setParseError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setText(value !== undefined && value !== null ? JSON.stringify(value, null, 2) : "{}");
+    setParseError(null);
+  }, [value]);
+
+  return (
+    <div>
+      <textarea
+        rows={4}
+        value={text}
+        onChange={(e) => {
+          setText(e.target.value);
+          try {
+            const parsed = JSON.parse(e.target.value);
+            setParseError(null);
+            onChange(parsed);
+          } catch (err) {
+            setParseError(err instanceof Error ? err.message : "Invalid JSON");
+          }
+        }}
+        className="w-full rounded-md border border-zinc-300 bg-zinc-950 p-2.5 font-mono text-[11px] text-zinc-100 focus:border-indigo-600 focus:outline-none"
+      />
+      {parseError && <p className="mt-1 text-[11px] text-rose-600">{parseError}</p>}
+    </div>
+  );
+}
+
 function slugifyUid(input: string): string {
   return input
     .trim()
@@ -289,18 +337,20 @@ export function EntryEditorPage() {
                 This content type has no fields yet. Add fields in Content-Type Builder.
               </p>
             ) : (
-              schema.fields.map((field) => (
-                <FieldRenderer
-                  key={field.name}
-                  field={field}
-                  value={formValues[field.name]}
-                  allValues={formValues}
-                  locale={activeLocale}
-                  componentsByUid={componentsByUid}
-                  contentTypesByUid={contentTypesByUid}
-                  onChange={(val) => setField(field.name, val)}
-                />
-              ))
+              schema.fields
+                .filter((field) => isFieldVisible(field, formValues))
+                .map((field) => (
+                  <FieldRenderer
+                    key={field.name}
+                    field={field}
+                    value={formValues[field.name]}
+                    allValues={formValues}
+                    locale={activeLocale}
+                    componentsByUid={componentsByUid}
+                    contentTypesByUid={contentTypesByUid}
+                    onChange={(val) => setField(field.name, val)}
+                  />
+                ))
             )}
           </CardContent>
         </Card>
@@ -582,20 +632,7 @@ function FieldRenderer({
       return (
         <div>
           {labelRow}
-          <textarea
-            rows={4}
-            defaultValue={
-              value !== undefined && value !== null ? JSON.stringify(value, null, 2) : "{}"
-            }
-            onBlur={(e) => {
-              try {
-                onChange(JSON.parse(e.target.value));
-              } catch {
-                // keep previous valid JSON if malformed
-              }
-            }}
-            className="w-full rounded-md border border-zinc-300 bg-zinc-950 p-2.5 font-mono text-[11px] text-zinc-100 focus:border-indigo-600 focus:outline-none"
-          />
+          <JsonFieldEditor value={value} onChange={onChange} />
         </div>
       );
 

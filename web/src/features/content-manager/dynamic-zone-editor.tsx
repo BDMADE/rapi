@@ -14,46 +14,41 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { GripVertical, Plus, Trash2 } from "lucide-react";
+import { useRef } from "react";
 import { Badge, Button, Input, Select, Switch } from "@/components/ui";
 import type { ContentTypeSchema, FieldDefinition } from "@/lib/api";
-
-interface BlockWithId {
-  __dzKey: string;
-  __component?: string;
-  [key: string]: unknown;
-}
 
 function makeKey() {
   return Math.random().toString(36).slice(2, 10);
 }
 
-function ensureKeys(items: unknown[]): BlockWithId[] {
-  return items.map((raw) => {
-    const obj = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>;
-    return {
-      ...obj,
-      __dzKey: typeof obj.__dzKey === "string" ? obj.__dzKey : makeKey(),
-    };
-  });
-}
-
-function stripKeys(items: BlockWithId[]): Record<string, unknown>[] {
-  return items.map(({ __dzKey: _ignored, ...rest }) => rest);
+/** Keeps stable React keys per array index across edits without leaking internal keys into saved JSON. */
+function useStableBlockKeys(length: number) {
+  const keysRef = useRef<string[]>([]);
+  while (keysRef.current.length < length) {
+    keysRef.current.push(makeKey());
+  }
+  if (keysRef.current.length > length) {
+    keysRef.current.length = length;
+  }
+  return keysRef;
 }
 
 function SortableBlockItem({
+  sortId,
   item,
   schema,
   onUpdate,
   onRemove,
 }: {
-  item: BlockWithId;
+  sortId: string;
+  item: Record<string, unknown>;
   schema: ContentTypeSchema | undefined;
-  onUpdate: (next: BlockWithId) => void;
+  onUpdate: (next: Record<string, unknown>) => void;
   onRemove: () => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition } = useSortable({
-    id: item.__dzKey,
+    id: sortId,
   });
 
   const style = {
@@ -65,7 +60,7 @@ function SortableBlockItem({
     <div
       ref={setNodeRef}
       style={style}
-      className="rounded-md border border-zinc-200 bg-zinc-50/70 p-3 space-y-2.5"
+      className="space-y-2.5 rounded-md border border-zinc-200 bg-zinc-50/70 p-3"
     >
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
@@ -78,9 +73,12 @@ function SortableBlockItem({
             <GripVertical className="h-4 w-4" />
           </button>
           <span className="text-xs font-semibold text-zinc-800">
-            {schema?.displayName ?? item.__component ?? "Component"}
+            {schema?.displayName ??
+              (typeof item.__component === "string" ? item.__component : "Component")}
           </span>
-          {item.__component && <Badge tone="mono">{item.__component}</Badge>}
+          {typeof item.__component === "string" && (
+            <Badge tone="mono">{item.__component}</Badge>
+          )}
         </div>
         <Button type="button" size="sm" variant="ghost" onClick={onRemove}>
           <Trash2 className="h-3.5 w-3.5 text-zinc-400 hover:text-rose-600" />
@@ -168,42 +166,53 @@ export function DynamicZoneEditor({
   onChange: (blocks: Record<string, unknown>[]) => void;
 }) {
   const sensors = useSensors(useSensor(PointerSensor));
-  const rawArr = Array.isArray(value) ? value : [];
-  const items = ensureKeys(rawArr);
+  const items: Record<string, unknown>[] = Array.isArray(value)
+    ? value.map((v) => (typeof v === "object" && v !== null ? (v as Record<string, unknown>) : {}))
+    : [];
+  const keysRef = useStableBlockKeys(items.length);
 
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
     if (!over || active.id === over.id) return;
-    const oldIndex = items.findIndex((i) => i.__dzKey === active.id);
-    const newIndex = items.findIndex((i) => i.__dzKey === over.id);
+    const oldIndex = keysRef.current.indexOf(String(active.id));
+    const newIndex = keysRef.current.indexOf(String(over.id));
     if (oldIndex !== -1 && newIndex !== -1) {
-      onChange(stripKeys(arrayMove(items, oldIndex, newIndex)));
+      keysRef.current = arrayMove(keysRef.current, oldIndex, newIndex);
+      onChange(arrayMove(items, oldIndex, newIndex));
     }
   };
 
   const addBlock = (compUid: string) => {
-    const next: BlockWithId[] = [...items, { __dzKey: makeKey(), __component: compUid }];
-    onChange(stripKeys(next));
+    keysRef.current.push(makeKey());
+    onChange([...items, { __component: compUid }]);
+  };
+
+  const removeBlock = (idx: number) => {
+    keysRef.current.splice(idx, 1);
+    onChange(items.filter((_, i) => i !== idx));
   };
 
   return (
     <div className="space-y-2.5 rounded-md border border-zinc-200 bg-white p-3">
       <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-        <SortableContext items={items.map((i) => i.__dzKey)} strategy={verticalListSortingStrategy}>
+        <SortableContext items={keysRef.current} strategy={verticalListSortingStrategy}>
           <div className="space-y-2">
             {items.map((item, idx) => (
               <SortableBlockItem
-                key={item.__dzKey}
+                key={keysRef.current[idx]}
+                sortId={keysRef.current[idx]}
                 item={item}
-                schema={item.__component ? componentsByUid.get(item.__component) : undefined}
+                schema={
+                  typeof item.__component === "string"
+                    ? componentsByUid.get(item.__component)
+                    : undefined
+                }
                 onUpdate={(updated) => {
                   const copy = [...items];
                   copy[idx] = updated;
-                  onChange(stripKeys(copy));
+                  onChange(copy);
                 }}
-                onRemove={() => {
-                  onChange(stripKeys(items.filter((_, i) => i !== idx)));
-                }}
+                onRemove={() => removeBlock(idx)}
               />
             ))}
           </div>
@@ -243,6 +252,10 @@ export function ComponentFieldEditor({
   onChange: (next: unknown) => void;
 }) {
   const sensors = useSensors(useSensor(PointerSensor));
+  const items: Record<string, unknown>[] = Array.isArray(value)
+    ? value.map((v) => (typeof v === "object" && v !== null ? (v as Record<string, unknown>) : {}))
+    : [];
+  const keysRef = useStableBlockKeys(items.length);
 
   if (!componentSchema) {
     return <p className="text-xs text-zinc-500">Component schema unavailable.</p>;
@@ -267,9 +280,6 @@ export function ComponentFieldEditor({
     );
   }
 
-  const rawArr = Array.isArray(value) ? value : [];
-  const items = ensureKeys(rawArr);
-
   return (
     <div className="space-y-2.5 rounded-md border border-zinc-200 bg-white p-3">
       <DndContext
@@ -277,26 +287,31 @@ export function ComponentFieldEditor({
         collisionDetection={closestCenter}
         onDragEnd={(ev) => {
           if (!ev.over || ev.active.id === ev.over.id) return;
-          const oldIdx = items.findIndex((i) => i.__dzKey === ev.active.id);
-          const newIdx = items.findIndex((i) => i.__dzKey === ev.over!.id);
+          const oldIdx = keysRef.current.indexOf(String(ev.active.id));
+          const newIdx = keysRef.current.indexOf(String(ev.over.id));
           if (oldIdx !== -1 && newIdx !== -1) {
-            onChange(stripKeys(arrayMove(items, oldIdx, newIdx)));
+            keysRef.current = arrayMove(keysRef.current, oldIdx, newIdx);
+            onChange(arrayMove(items, oldIdx, newIdx));
           }
         }}
       >
-        <SortableContext items={items.map((i) => i.__dzKey)} strategy={verticalListSortingStrategy}>
+        <SortableContext items={keysRef.current} strategy={verticalListSortingStrategy}>
           <div className="space-y-2">
             {items.map((item, idx) => (
               <SortableBlockItem
-                key={item.__dzKey}
+                key={keysRef.current[idx]}
+                sortId={keysRef.current[idx]}
                 item={item}
                 schema={componentSchema}
                 onUpdate={(updated) => {
                   const copy = [...items];
                   copy[idx] = updated;
-                  onChange(stripKeys(copy));
+                  onChange(copy);
                 }}
-                onRemove={() => onChange(stripKeys(items.filter((_, i) => i !== idx)))}
+                onRemove={() => {
+                  keysRef.current.splice(idx, 1);
+                  onChange(items.filter((_, i) => i !== idx));
+                }}
               />
             ))}
           </div>
@@ -307,7 +322,10 @@ export function ComponentFieldEditor({
         type="button"
         size="sm"
         variant="secondary"
-        onClick={() => onChange(stripKeys([...items, { __dzKey: makeKey() }]))}
+        onClick={() => {
+          keysRef.current.push(makeKey());
+          onChange([...items, {}]);
+        }}
       >
         <Plus className="h-3 w-3" />
         Add {componentSchema.displayName} item

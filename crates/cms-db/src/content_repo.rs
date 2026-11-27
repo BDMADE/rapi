@@ -63,7 +63,7 @@ impl DynamicRepository {
         // Dynamic Strapi v5 `filters` AST
         if let Some(filter_val) = &query.filters {
             let mut filter_sql = String::new();
-            compile_filter_node(schema, filter_val, &mut filter_sql, &mut binds)?;
+            compile_filter_node(schema, filter_val, strip_private, &mut filter_sql, &mut binds)?;
             if !filter_sql.is_empty() {
                 where_clauses.push(format!("({filter_sql})"));
             }
@@ -83,11 +83,18 @@ impl DynamicRepository {
             .map_err(|e| ApiError::Internal(format!("count documents failed: {e}")))?
             as u64;
 
-        let page = query.page.max(1);
-        let page_size = query.page_size.clamp(1, 200);
-        let offset = (page - 1) * page_size;
+        let (page, page_size, offset) = if query.start.is_some() || query.limit.is_some() {
+            let lim = query.limit.unwrap_or(query.page_size).clamp(1, 200);
+            let st = query.start.unwrap_or(0);
+            let computed_page = (st / lim) + 1;
+            (computed_page, lim, st)
+        } else {
+            let p = query.page.max(1);
+            let ps = query.page_size.clamp(1, 200);
+            (p, ps, (p - 1) * ps)
+        };
 
-        let order_sql = build_order_by(schema, &query.sort)?;
+        let order_sql = build_order_by(schema, &query.sort, strip_private)?;
         let select_sql = format!(
             "SELECT * FROM \"{table_name}\" WHERE {where_sql} ORDER BY {order_sql} LIMIT ? OFFSET ?"
         );
@@ -1798,7 +1805,41 @@ enum SqlBind {
 }
 
 impl SqlBind {
-    fn from_json(val: &serde_json::Value) -> ApiResult<Self> {
+    fn from_json_for_type(field_type: Option<FieldType>, val: &serde_json::Value) -> ApiResult<Self> {
+        match field_type {
+            Some(FieldType::Boolean) => {
+                let b = val
+                    .as_bool()
+                    .or_else(|| {
+                        val.as_str().and_then(|s| match s.to_ascii_lowercase().as_str() {
+                            "true" | "1" => Some(true),
+                            "false" | "0" => Some(false),
+                            _ => None,
+                        })
+                    })
+                    .or_else(|| val.as_i64().map(|n| n != 0))
+                    .ok_or_else(|| ApiError::BadRequest("Boolean filter expects true/false".into()))?;
+                return Ok(Self::Int(if b { 1 } else { 0 }));
+            }
+            Some(FieldType::Integer | FieldType::BigInteger) => {
+                if let Some(i) = val
+                    .as_i64()
+                    .or_else(|| val.as_str().and_then(|s| s.parse::<i64>().ok()))
+                {
+                    return Ok(Self::Int(i));
+                }
+            }
+            Some(FieldType::Float | FieldType::Decimal) => {
+                if let Some(f) = val
+                    .as_f64()
+                    .or_else(|| val.as_str().and_then(|s| s.parse::<f64>().ok()))
+                {
+                    return Ok(Self::Float(f));
+                }
+            }
+            _ => {}
+        }
+
         match val {
             serde_json::Value::Bool(b) => Ok(Self::Int(if *b { 1 } else { 0 })),
             serde_json::Value::Number(n) => {
@@ -1810,13 +1851,7 @@ impl SqlBind {
                     Err(ApiError::BadRequest("Invalid numeric filter value".into()))
                 }
             }
-            serde_json::Value::String(s) => {
-                if s == "true" || s == "false" {
-                    // Keep as string unless matched against integer column; SQLite handles affinity,
-                    // though explicit string works for text/enum/dates cleanly.
-                }
-                Ok(Self::Text(s.clone()))
-            }
+            serde_json::Value::String(s) => Ok(Self::Text(s.clone())),
             _ => Err(ApiError::BadRequest(
                 "Filter scalar value must be string, number, or boolean".into(),
             )),
@@ -1846,22 +1881,27 @@ impl SqlBind {
     }
 }
 
-fn resolve_filterable_column(schema: &ContentTypeSchema, key: &str) -> ApiResult<String> {
+fn resolve_filterable_column(
+    schema: &ContentTypeSchema,
+    key: &str,
+    strip_private: bool,
+) -> ApiResult<(String, Option<FieldType>)> {
     match key {
-        "id" => Ok("id".into()),
-        "documentId" | "document_id" => Ok("document_id".into()),
-        "createdAt" | "created_at" => Ok("created_at".into()),
-        "updatedAt" | "updated_at" => Ok("updated_at".into()),
-        "publishedAt" | "published_at" => Ok("published_at".into()),
-        "locale" => Ok("locale".into()),
+        "id" => Ok(("id".into(), Some(FieldType::Integer))),
+        "documentId" | "document_id" => Ok(("document_id".into(), Some(FieldType::String))),
+        "createdAt" | "created_at" => Ok(("created_at".into(), Some(FieldType::DateTime))),
+        "updatedAt" | "updated_at" => Ok(("updated_at".into(), Some(FieldType::DateTime))),
+        "publishedAt" | "published_at" => Ok(("published_at".into(), Some(FieldType::DateTime))),
+        "locale" => Ok(("locale".into(), Some(FieldType::String))),
         other => {
             let found = schema.fields.iter().find(|f| {
                 f.name == other
                     && f.field_type.has_physical_column()
                     && f.field_type != FieldType::Password
+                    && (!strip_private || !f.private)
             });
             if let Some(f) = found {
-                Ok(f.name.clone())
+                Ok((f.name.clone(), Some(f.field_type)))
             } else {
                 Err(ApiError::BadRequest(format!(
                     "Unknown or non-filterable field '{other}'"
@@ -1874,6 +1914,7 @@ fn resolve_filterable_column(schema: &ContentTypeSchema, key: &str) -> ApiResult
 fn compile_filter_node(
     schema: &ContentTypeSchema,
     node: &serde_json::Value,
+    strip_private: bool,
     out: &mut String,
     binds: &mut Vec<SqlBind>,
 ) -> ApiResult<()> {
@@ -1888,7 +1929,7 @@ fn compile_filter_node(
             let mut sub_parts = Vec::new();
             for item in arr {
                 let mut sub_sql = String::new();
-                compile_filter_node(schema, item, &mut sub_sql, binds)?;
+                compile_filter_node(schema, item, strip_private, &mut sub_sql, binds)?;
                 if !sub_sql.is_empty() {
                     sub_parts.push(format!("({sub_sql})"));
                 }
@@ -1899,14 +1940,14 @@ fn compile_filter_node(
             }
         } else if key == "$not" {
             let mut sub_sql = String::new();
-            compile_filter_node(schema, val, &mut sub_sql, binds)?;
+            compile_filter_node(schema, val, strip_private, &mut sub_sql, binds)?;
             if !sub_sql.is_empty() {
                 clauses.push(format!("NOT ({sub_sql})"));
             }
         } else {
-            let col = resolve_filterable_column(schema, key)?;
+            let (col, ftype) = resolve_filterable_column(schema, key, strip_private)?;
             let mut field_sql = String::new();
-            compile_field_ops(&col, val, &mut field_sql, binds)?;
+            compile_field_ops(&col, ftype, val, &mut field_sql, binds)?;
             if !field_sql.is_empty() {
                 clauses.push(field_sql);
             }
@@ -1932,6 +1973,7 @@ fn extract_filter_list(val: &serde_json::Value) -> ApiResult<Vec<&serde_json::Va
 
 fn compile_field_ops(
     col: &str,
+    ftype: Option<FieldType>,
     val: &serde_json::Value,
     out: &mut String,
     binds: &mut Vec<SqlBind>,
@@ -1941,7 +1983,7 @@ fn compile_field_ops(
         if val.is_null() {
             out.push_str(&format!("\"{col}\" IS NULL"));
         } else {
-            binds.push(SqlBind::from_json(val)?);
+            binds.push(SqlBind::from_json_for_type(ftype, val)?);
             out.push_str(&format!("\"{col}\" = ?"));
         }
         return Ok(());
@@ -1956,7 +1998,7 @@ fn compile_field_ops(
                 if operand.is_null() {
                     parts.push(format!("\"{col}\" IS NULL"));
                 } else {
-                    binds.push(SqlBind::from_json(operand)?);
+                    binds.push(SqlBind::from_json_for_type(ftype, operand)?);
                     parts.push(format!("\"{col}\" = ?"));
                 }
             }
@@ -1971,7 +2013,7 @@ fn compile_field_ops(
                 if operand.is_null() {
                     parts.push(format!("\"{col}\" IS NOT NULL"));
                 } else {
-                    binds.push(SqlBind::from_json(operand)?);
+                    binds.push(SqlBind::from_json_for_type(ftype, operand)?);
                     parts.push(format!("(\"{col}\" IS NULL OR \"{col}\" != ?)"));
                 }
             }
@@ -1983,19 +2025,19 @@ fn compile_field_ops(
                 parts.push(format!("(\"{col}\" IS NULL OR LOWER(\"{col}\") != ?)"));
             }
             "$lt" => {
-                binds.push(SqlBind::from_json(operand)?);
+                binds.push(SqlBind::from_json_for_type(ftype, operand)?);
                 parts.push(format!("\"{col}\" < ?"));
             }
             "$lte" => {
-                binds.push(SqlBind::from_json(operand)?);
+                binds.push(SqlBind::from_json_for_type(ftype, operand)?);
                 parts.push(format!("\"{col}\" <= ?"));
             }
             "$gt" => {
-                binds.push(SqlBind::from_json(operand)?);
+                binds.push(SqlBind::from_json_for_type(ftype, operand)?);
                 parts.push(format!("\"{col}\" > ?"));
             }
             "$gte" => {
-                binds.push(SqlBind::from_json(operand)?);
+                binds.push(SqlBind::from_json_for_type(ftype, operand)?);
                 parts.push(format!("\"{col}\" >= ?"));
             }
             "$contains" => {
@@ -2052,7 +2094,7 @@ fn compile_field_ops(
                     });
                 } else {
                     for it in &items {
-                        binds.push(SqlBind::from_json(it)?);
+                        binds.push(SqlBind::from_json_for_type(ftype, it)?);
                     }
                     let ph = vec!["?"; items.len()].join(", ");
                     let kw = if op == "$in" { "IN" } else { "NOT IN" };
@@ -2088,8 +2130,8 @@ fn compile_field_ops(
                         "$between expects exactly 2 values".into(),
                     ));
                 }
-                binds.push(SqlBind::from_json(items[0])?);
-                binds.push(SqlBind::from_json(items[1])?);
+                binds.push(SqlBind::from_json_for_type(ftype, items[0])?);
+                binds.push(SqlBind::from_json_for_type(ftype, items[1])?);
                 parts.push(format!("\"{col}\" BETWEEN ? AND ?"));
             }
             other => {
@@ -2110,13 +2152,17 @@ fn escape_like(s: &str) -> String {
         .replace('_', "\\_")
 }
 
-fn build_order_by(schema: &ContentTypeSchema, sorts: &[SortSpec]) -> ApiResult<String> {
+fn build_order_by(
+    schema: &ContentTypeSchema,
+    sorts: &[SortSpec],
+    strip_private: bool,
+) -> ApiResult<String> {
     if sorts.is_empty() {
         return Ok("\"created_at\" DESC, \"id\" DESC".into());
     }
     let mut parts = Vec::with_capacity(sorts.len());
     for s in sorts {
-        let col = resolve_filterable_column(schema, &s.field)?;
+        let (col, _) = resolve_filterable_column(schema, &s.field, strip_private)?;
         let dir = if s.desc { "DESC" } else { "ASC" };
         parts.push(format!("\"{col}\" {dir}"));
     }

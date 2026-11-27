@@ -1578,4 +1578,184 @@ mod tests {
         let versions = ver_json["data"].as_array().unwrap();
         assert!(versions.len() >= 3); // initial draft + published + v2 draft
     }
+
+    #[tokio::test]
+    async fn phase3_security_and_query_regressions() {
+        let app = test_router().await;
+
+        let reg = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/register-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "email": "p3reg@rapi.dev",
+                            "password": "Password123!",
+                            "firstname": "Reg"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let reg_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(reg.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let jwt = reg_json["data"]["token"].as_str().unwrap().to_string();
+
+        // Create schema with private field, boolean field, and required title
+        let ct = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/content-types")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "uid": "api::item.item",
+                            "kind": "collectionType",
+                            "singularName": "item",
+                            "pluralName": "items",
+                            "displayName": "Item",
+                            "draftAndPublish": false,
+                            "fields": [
+                                { "name": "title", "fieldType": "string", "required": true },
+                                { "name": "featured", "fieldType": "boolean" },
+                                { "name": "internalSecret", "fieldType": "string", "private": true }
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ct.status(), StatusCode::OK);
+
+        // Grant public find
+        let _ = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/public-permissions")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "permissions": [{ "action": "api::item.item.find", "targetUid": "api::item.item" }]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Create two items (one featured=true, one featured=false)
+        let mut first_id = String::new();
+        for (title, featured) in [("Alpha", true), ("Beta", false)] {
+            let res = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/items")
+                        .header("authorization", format!("Bearer {jwt}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "data": {
+                                    "title": title,
+                                    "featured": featured,
+                                    "internalSecret": "top-secret-42"
+                                }
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            let j: serde_json::Value =
+                serde_json::from_slice(&to_bytes(res.into_body(), usize::MAX).await.unwrap())
+                    .unwrap();
+            if first_id.is_empty() {
+                first_id = j["data"]["documentId"].as_str().unwrap().to_string();
+            }
+        }
+
+        // BUG-P3-01: Filtering or sorting on `private: true` field on public REST API must return 400
+        let private_probe = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/items?filters[internalSecret][$startsWith]=top")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(private_probe.status(), StatusCode::BAD_REQUEST);
+
+        // BUG-P3-02: Boolean qs string filter `filters[featured][$eq]=true` must coerce to INTEGER 1 and match Alpha
+        let bool_filter = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/items?filters[featured][$eq]=true")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bool_filter.status(), StatusCode::OK);
+        let bool_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(bool_filter.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let matched = bool_json["data"].as_array().unwrap();
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0]["title"], "Alpha");
+
+        // BUG-P3-05: Offset pagination `pagination[start]=1&pagination[limit]=1` returns 1 item with total=2
+        let offset_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/items?pagination[start]=1&pagination[limit]=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(offset_res.status(), StatusCode::OK);
+        let offset_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(offset_res.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(offset_json["data"].as_array().unwrap().len(), 1);
+        assert_eq!(offset_json["meta"]["pagination"]["total"], 2);
+
+        // BUG-P3-03: Clearing required `title` via PUT on published document must fail with 400
+        let clear_req = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/items/{first_id}"))
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "data": { "title": null } }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(clear_req.status(), StatusCode::BAD_REQUEST);
+    }
 }

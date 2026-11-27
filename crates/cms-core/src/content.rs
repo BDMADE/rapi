@@ -19,6 +19,10 @@ pub struct DocumentQuery {
     #[serde(default = "default_page_size")]
     pub page_size: u64,
     #[serde(default)]
+    pub start: Option<u64>,
+    #[serde(default)]
+    pub limit: Option<u64>,
+    #[serde(default)]
     pub locale: Option<String>,
     #[serde(default)]
     pub status: Option<DocumentStatus>,

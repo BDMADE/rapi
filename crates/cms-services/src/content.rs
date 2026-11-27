@@ -173,14 +173,33 @@ impl ContentService {
         strip_private: bool,
     ) -> ApiResult<serde_json::Value> {
         let components_map = self.load_components_map().await?;
-        // Partial updates validate provided fields; full required check runs on publish
-        let parsed = parse_and_validate_payload(
-            schema,
-            raw_data,
-            &components_map,
-            false,
-            false,
-        )?;
+        let publishing = target_status == DocumentStatus::Published || !schema.draft_and_publish;
+        let parsed = parse_and_validate_payload(schema, raw_data, &components_map, false, false)?;
+
+        // Prevent clearing a required field to null/empty when writing directly to Published status
+        if publishing {
+            for f in schema
+                .fields
+                .iter()
+                .filter(|f| f.field_type.has_physical_column() && f.required)
+            {
+                if let Some(val) = parsed.scalars.get(&f.name) {
+                    let is_empty = val.is_null()
+                        || val
+                            .as_str()
+                            .is_some_and(|s| s.trim().is_empty());
+                    if is_empty {
+                        return Err(ApiError::Validation {
+                            message: format!(
+                                "Required field '{}' cannot be cleared on a published document",
+                                f.name
+                            ),
+                            details: serde_json::json!({ "field": f.name }),
+                        });
+                    }
+                }
+            }
+        }
 
         let doc = self
             .repo

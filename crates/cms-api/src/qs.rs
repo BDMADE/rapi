@@ -61,6 +61,10 @@ pub struct PaginationQuery {
     pub page: u64,
     #[serde(default = "default_page_size")]
     pub page_size: u64,
+    #[serde(default)]
+    pub start: Option<u64>,
+    #[serde(default)]
+    pub limit: Option<u64>,
     #[serde(default = "default_with_count")]
     pub with_count: bool,
 }
@@ -70,6 +74,8 @@ impl Default for PaginationQuery {
         Self {
             page: default_page(),
             page_size: default_page_size(),
+            start: None,
+            limit: None,
             with_count: default_with_count(),
         }
     }
@@ -133,6 +139,8 @@ impl ContentQueryParams {
                                     sort: parse_sorts(self.sort),
                                     page: self.pagination.page,
                                     page_size: self.pagination.page_size,
+                                    start: self.pagination.start,
+                                    limit: self.pagination.limit,
                                     locale: self.locale,
                                     status: self.status,
                                     search_query: self.q,
@@ -180,6 +188,8 @@ impl ContentQueryParams {
             sort: parse_sorts(self.sort),
             page: self.pagination.page,
             page_size: self.pagination.page_size,
+            start: self.pagination.start,
+            limit: self.pagination.limit,
             locale: self.locale,
             status: self.status,
             search_query: self.q,
