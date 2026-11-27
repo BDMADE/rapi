@@ -129,6 +129,128 @@ export interface AuthTokenResponse {
   permissions: PermissionRule[];
 }
 
+export type ContentKind = "collectionType" | "singleType" | "component";
+
+export type FieldType =
+  | "string"
+  | "text"
+  | "richtext"
+  | "blocks"
+  | "integer"
+  | "biginteger"
+  | "float"
+  | "decimal"
+  | "boolean"
+  | "date"
+  | "datetime"
+  | "time"
+  | "email"
+  | "password"
+  | "enumeration"
+  | "json"
+  | "uid"
+  | "media"
+  | "relation"
+  | "component"
+  | "dynamiczone"
+  | "custom";
+
+export type RelationKind =
+  | "oneToOne"
+  | "oneToMany"
+  | "manyToOne"
+  | "manyToMany"
+  | "morphOne"
+  | "morphMany";
+
+export interface FieldValidation {
+  minLength?: number;
+  maxLength?: number;
+  min?: number;
+  max?: number;
+  regex?: string;
+  enumValues?: string[];
+  targetField?: string;
+  multiple?: boolean;
+  allowedTypes?: string[];
+}
+
+export interface RelationConfig {
+  relationType: RelationKind;
+  targetUid?: string;
+  inversedBy?: string;
+  mappedBy?: string;
+}
+
+export interface ComponentConfig {
+  componentUid?: string;
+  repeatable?: boolean;
+  components?: string[];
+  min?: number;
+  max?: number;
+}
+
+export interface FieldDefinition {
+  name: string;
+  fieldType: FieldType;
+  required?: boolean;
+  unique?: boolean;
+  localized?: boolean;
+  private?: boolean;
+  defaultValue?: unknown;
+  validation?: FieldValidation;
+  relation?: RelationConfig;
+  component?: ComponentConfig;
+  customFieldUid?: string;
+}
+
+export interface ContentTypeSchema {
+  uid: string;
+  kind: ContentKind;
+  category?: string;
+  singularName: string;
+  pluralName: string;
+  displayName: string;
+  description?: string;
+  icon?: string;
+  draftAndPublish: boolean;
+  i18nEnabled: boolean;
+  pluginOptions?: Record<string, unknown>;
+  options?: Record<string, unknown>;
+  fields: FieldDefinition[];
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface SchemaCatalogResponse {
+  contentTypes: ContentTypeSchema[];
+  components: ContentTypeSchema[];
+}
+
+export interface PhysicalColumnInfo {
+  cid: number;
+  name: string;
+  dataType: string;
+  notNull: boolean;
+  primaryKey: boolean;
+}
+
+export interface SchemaMigrationRecord {
+  id: number;
+  contentTypeUid: string;
+  operation: string;
+  ddlSql: string;
+  appliedAt: string;
+}
+
+export interface SchemaInspectionDto {
+  uid: string;
+  tableName: string | null;
+  ftsTableName: string | null;
+  columns: PhysicalColumnInfo[];
+  migrations: SchemaMigrationRecord[];
+}
+
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 
 // Deduplicates concurrent 401 refresh attempts so single-use refresh token rotation
@@ -347,4 +469,47 @@ export const api = {
       kind === "admin" ? `/admin/admin-tokens/${id}` : `/admin/api-tokens/${id}`,
       { method: "DELETE" },
     ),
+
+  // Content-Type Builder (Schemas & Components)
+  listSchemas: async () =>
+    (await requestJson<ApiResponse<SchemaCatalogResponse>>("/admin/content-types")).data,
+
+  getSchema: async (uid: string) =>
+    (
+      await requestJson<ApiResponse<ContentTypeSchema>>(
+        `/admin/content-types/${encodeURIComponent(uid)}`,
+      )
+    ).data,
+
+  createSchema: async (schema: ContentTypeSchema) =>
+    (
+      await requestJson<ApiResponse<ContentTypeSchema>>("/admin/content-types", {
+        method: "POST",
+        body: JSON.stringify(schema),
+      })
+    ).data,
+
+  updateSchema: async (uid: string, schema: ContentTypeSchema) =>
+    (
+      await requestJson<ApiResponse<ContentTypeSchema>>(
+        `/admin/content-types/${encodeURIComponent(uid)}`,
+        {
+          method: "PUT",
+          body: JSON.stringify(schema),
+        },
+      )
+    ).data,
+
+  deleteSchema: async (uid: string) =>
+    requestJson<ApiResponse<{ deleted: string }>>(
+      `/admin/content-types/${encodeURIComponent(uid)}`,
+      { method: "DELETE" },
+    ),
+
+  inspectSchema: async (uid: string) =>
+    (
+      await requestJson<ApiResponse<SchemaInspectionDto>>(
+        `/admin/content-types/${encodeURIComponent(uid)}/inspection`,
+      )
+    ).data,
 };

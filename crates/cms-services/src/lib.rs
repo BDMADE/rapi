@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod container;
+pub mod schema;
 pub mod system;
 
 pub use auth::{
@@ -7,4 +8,5 @@ pub use auth::{
     UpdateAdminUserInput, UpsertRoleInput,
 };
 pub use container::ServiceContainer;
+pub use schema::SchemaService;
 pub use system::{AdminInitDto, HealthDto, ReadinessDto, SystemOverviewDto, SystemService};
