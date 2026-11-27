@@ -131,27 +131,41 @@ export interface AuthTokenResponse {
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 
-async function tryRefreshSession(): Promise<string | null> {
-  const { refreshToken, setSession, clearSession } = useAuthStore.getState();
-  if (!refreshToken) return null;
+// Deduplicates concurrent 401 refresh attempts so single-use refresh token rotation
+// does not race when multiple parallel queries fire on an expired JWT.
+let inflightRefresh: Promise<string | null> | null = null;
 
-  try {
-    const res = await fetch(`${API_BASE}/admin/refresh-token`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refreshToken }),
-    });
-    if (!res.ok) {
+async function tryRefreshSession(): Promise<string | null> {
+  if (inflightRefresh) {
+    return inflightRefresh;
+  }
+
+  inflightRefresh = (async () => {
+    const { refreshToken, setSession, clearSession } = useAuthStore.getState();
+    if (!refreshToken) return null;
+
+    try {
+      const res = await fetch(`${API_BASE}/admin/refresh-token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refreshToken }),
+      });
+      if (!res.ok) {
+        clearSession();
+        return null;
+      }
+      const json = (await res.json()) as ApiResponse<AuthTokenResponse>;
+      setSession(json.data);
+      return json.data.token;
+    } catch {
       clearSession();
       return null;
+    } finally {
+      inflightRefresh = null;
     }
-    const json = (await res.json()) as ApiResponse<AuthTokenResponse>;
-    setSession(json.data);
-    return json.data.token;
-  } catch {
-    clearSession();
-    return null;
-  }
+  })();
+
+  return inflightRefresh;
 }
 
 async function requestJson<T>(
@@ -244,6 +258,23 @@ export const api = {
     (
       await requestJson<ApiResponse<AdminUserDto>>("/admin/users", {
         method: "POST",
+        body: JSON.stringify(payload),
+      })
+    ).data,
+
+  updateAdminUser: async (
+    id: string,
+    payload: {
+      firstname?: string;
+      lastname?: string;
+      isActive?: boolean;
+      password?: string;
+      roleIds?: string[];
+    },
+  ) =>
+    (
+      await requestJson<ApiResponse<AdminUserDto>>(`/admin/users/${id}`, {
+        method: "PUT",
         body: JSON.stringify(payload),
       })
     ).data,

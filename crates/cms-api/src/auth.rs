@@ -185,8 +185,16 @@ async fn login_handler(
     Json(input): Json<LoginInput>,
 ) -> Result<Json<ApiResponse<AuthTokenResponse>>, HttpApiError> {
     let ip = client_key(&headers);
-    let key = format!("{ip}:{}", input.email.to_lowercase());
-    services.auth.check_rate_limit("login", &key, 10, 60).await?;
+    let email_key = input.email.trim().to_lowercase();
+    // Enforce both per-email (immune to X-Forwarded-For spoofing) and per-IP rate limits
+    services
+        .auth
+        .check_rate_limit("login_email", &email_key, 10, 60)
+        .await?;
+    services
+        .auth
+        .check_rate_limit("login_ip", &ip, 30, 60)
+        .await?;
     let res = services
         .auth
         .login_admin(input, user_agent(&headers), Some(&ip))

@@ -1,9 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, KeyRound, Plus, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Badge,
   Button,
+  Checkbox,
   DataTable,
   Dialog,
   DialogContent,
@@ -29,9 +30,18 @@ export function TokensPage({ defaultKind = "api" }: { defaultKind?: "api" | "adm
   const { pushToast } = useToast();
   const queryClient = useQueryClient();
 
+  useEffect(() => {
+    setKind(defaultKind);
+  }, [defaultKind]);
+
   const tokensQuery = useQuery({
     queryKey: ["tokens", kind],
     queryFn: () => api.listTokens(kind),
+  });
+
+  const catalogQuery = useQuery({
+    queryKey: ["permission-catalog"],
+    queryFn: api.getPermissionCatalog,
   });
 
   const [open, setOpen] = useState(false);
@@ -39,6 +49,7 @@ export function TokensPage({ defaultKind = "api" }: { defaultKind?: "api" | "adm
   const [description, setDescription] = useState("");
   const [tokenType, setTokenType] = useState<TokenType>("read-only");
   const [lifespan, setLifespan] = useState("unlimited");
+  const [customPerms, setCustomPerms] = useState<Set<string>>(new Set());
   const [revealedKey, setRevealedKey] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -49,6 +60,10 @@ export function TokensPage({ defaultKind = "api" }: { defaultKind?: "api" | "adm
         description,
         type: tokenType,
         lifespanMs: lifespan === "unlimited" ? null : Number(lifespan),
+        permissions:
+          tokenType === "custom"
+            ? Array.from(customPerms).map((action) => ({ action }))
+            : [],
       }),
     onSuccess: (created) => {
       queryClient.invalidateQueries({ queryKey: ["tokens", kind] });
@@ -56,6 +71,7 @@ export function TokensPage({ defaultKind = "api" }: { defaultKind?: "api" | "adm
       setOpen(false);
       setName("");
       setDescription("");
+      setCustomPerms(new Set());
       pushToast({ title: "Token created — copy key now", tone: "success" });
     },
     onError: (e: Error) =>
@@ -142,6 +158,32 @@ export function TokensPage({ defaultKind = "api" }: { defaultKind?: "api" | "adm
                   />
                 </div>
               </div>
+              {tokenType === "custom" && (
+                <div className="space-y-1.5">
+                  <label className="block text-xs font-medium text-zinc-700">
+                    Allowed permissions ({customPerms.size} selected)
+                  </label>
+                  <div className="max-h-40 space-y-1 overflow-y-auto rounded border border-zinc-200 p-2">
+                    {(catalogQuery.data ?? []).map((item) => (
+                      <label
+                        key={item.action}
+                        className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-xs hover:bg-zinc-50"
+                      >
+                        <Checkbox
+                          checked={customPerms.has(item.action)}
+                          onCheckedChange={(checked) => {
+                            const next = new Set(customPerms);
+                            if (checked) next.add(item.action);
+                            else next.delete(item.action);
+                            setCustomPerms(next);
+                          }}
+                        />
+                        <span className="text-zinc-800">{item.label}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
               <div className="flex justify-end gap-2 pt-2">
                 <Button type="button" variant="secondary" onClick={() => setOpen(false)}>
                   Cancel

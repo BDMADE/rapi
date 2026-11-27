@@ -46,6 +46,75 @@ impl AuthRepository {
             .map_err(|e| ApiError::Internal(format!("count admin_users failed: {e}")))
     }
 
+    pub async fn count_active_super_admins(&self) -> ApiResult<i64> {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM admin_users WHERE is_super_admin = 1 AND is_active = 1",
+        )
+        .fetch_one(&self.pools.reader)
+        .await
+        .map_err(|e| ApiError::Internal(format!("count active super admins failed: {e}")))
+    }
+
+    /// Atomically creates the very first Super Admin inside a single writer transaction,
+    /// eliminating TOCTOU race conditions on concurrent onboarding requests.
+    pub async fn create_first_admin_atomic(
+        &self,
+        email: &str,
+        username: Option<&str>,
+        password_hash: &str,
+        firstname: &str,
+        lastname: &str,
+    ) -> ApiResult<AdminUserDto> {
+        let id = Uuid::now_v7().to_string();
+        let mut tx = self
+            .pools
+            .writer
+            .begin()
+            .await
+            .map_err(|e| ApiError::Internal(format!("begin tx failed: {e}")))?;
+
+        let existing: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM admin_users")
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| ApiError::Internal(format!("count admin_users in tx failed: {e}")))?;
+
+        if existing > 0 {
+            return Err(ApiError::Conflict(
+                "Initial administrator already exists".to_string(),
+            ));
+        }
+
+        sqlx::query(
+            r#"
+            INSERT INTO admin_users (id, email, username, password_hash, firstname, lastname, is_active, is_super_admin)
+            VALUES (?, ?, ?, ?, ?, ?, 1, 1)
+            "#,
+        )
+        .bind(&id)
+        .bind(email.to_lowercase())
+        .bind(username)
+        .bind(password_hash)
+        .bind(firstname)
+        .bind(lastname)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ApiError::Internal(format!("insert first admin failed: {e}")))?;
+
+        sqlx::query("INSERT OR IGNORE INTO admin_user_roles (user_id, role_id) VALUES (?, 'role_super_admin')")
+            .bind(&id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| ApiError::Internal(format!("assign super admin role failed: {e}")))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| ApiError::Internal(format!("commit first admin tx failed: {e}")))?;
+
+        self.find_admin_dto_by_id(&id)
+            .await?
+            .ok_or_else(|| ApiError::Internal("Created admin user not found".to_string()))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn create_admin_user(
         &self,
@@ -94,12 +163,21 @@ impl AuthRepository {
         }
 
         for role_id in role_ids {
-            sqlx::query("INSERT OR IGNORE INTO admin_user_roles (user_id, role_id) VALUES (?, ?)")
-                .bind(&id)
-                .bind(role_id)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| ApiError::Internal(format!("assign role failed: {e}")))?;
+            let role_res = sqlx::query(
+                "INSERT OR IGNORE INTO admin_user_roles (user_id, role_id) VALUES (?, ?)",
+            )
+            .bind(&id)
+            .bind(role_id)
+            .execute(&mut *tx)
+            .await;
+            if let Err(e) = role_res {
+                if e.to_string().contains("FOREIGN KEY") {
+                    return Err(ApiError::BadRequest(format!(
+                        "Role '{role_id}' does not exist"
+                    )));
+                }
+                return Err(ApiError::Internal(format!("assign role failed: {e}")));
+            }
         }
 
         tx.commit()
@@ -223,12 +301,21 @@ impl AuthRepository {
                 .await
                 .map_err(|e| ApiError::Internal(format!("clear user roles failed: {e}")))?;
             for role_id in roles {
-                sqlx::query("INSERT OR IGNORE INTO admin_user_roles (user_id, role_id) VALUES (?, ?)")
-                    .bind(id)
-                    .bind(role_id)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|e| ApiError::Internal(format!("assign role failed: {e}")))?;
+                let role_res = sqlx::query(
+                    "INSERT OR IGNORE INTO admin_user_roles (user_id, role_id) VALUES (?, ?)",
+                )
+                .bind(id)
+                .bind(role_id)
+                .execute(&mut *tx)
+                .await;
+                if let Err(e) = role_res {
+                    if e.to_string().contains("FOREIGN KEY") {
+                        return Err(ApiError::BadRequest(format!(
+                            "Role '{role_id}' does not exist"
+                        )));
+                    }
+                    return Err(ApiError::Internal(format!("assign role failed: {e}")));
+                }
             }
             let is_super = roles.iter().any(|r| r == "role_super_admin");
             sqlx::query("UPDATE admin_users SET is_super_admin = ? WHERE id = ?")
@@ -349,6 +436,25 @@ impl AuthRepository {
             .await
             .map_err(|e| ApiError::Internal(format!("delete session failed: {e}")))?;
         Ok(())
+    }
+
+    pub async fn delete_sessions_for_user(&self, user_type: &str, user_id: &str) -> ApiResult<()> {
+        sqlx::query("DELETE FROM sessions WHERE user_type = ? AND user_id = ?")
+            .bind(user_type)
+            .bind(user_id)
+            .execute(&self.pools.writer)
+            .await
+            .map_err(|e| ApiError::Internal(format!("delete user sessions failed: {e}")))?;
+        Ok(())
+    }
+
+    pub async fn role_exists(&self, role_id: &str) -> ApiResult<bool> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM admin_roles WHERE id = ?")
+            .bind(role_id)
+            .fetch_one(&self.pools.reader)
+            .await
+            .map_err(|e| ApiError::Internal(format!("check role_exists failed: {e}")))?;
+        Ok(count > 0)
     }
 
     // --- Roles & Permissions ---
@@ -774,7 +880,21 @@ impl AuthRepository {
         }))
     }
 
-    pub async fn delete_token(&self, is_admin_token: bool, id: &str) -> ApiResult<()> {
+    pub async fn touch_token_last_used(&self, is_admin_token: bool, id: &str) -> ApiResult<()> {
+        let table = if is_admin_token { "admin_tokens" } else { "api_tokens" };
+        let sql = format!(
+            "UPDATE {table} SET last_used_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?"
+        );
+        sqlx::query(&sql)
+            .bind(id)
+            .execute(&self.pools.writer)
+            .await
+            .map_err(|e| ApiError::Internal(format!("touch token last_used_at failed: {e}")))?;
+        Ok(())
+    }
+
+    /// Deletes a token and returns its `access_key_hash` so callers can immediately evict it from cache.
+    pub async fn delete_token(&self, is_admin_token: bool, id: &str) -> ApiResult<String> {
         let table = if is_admin_token { "admin_tokens" } else { "api_tokens" };
         let subject_type = if is_admin_token { "admin_token" } else { "api_token" };
 
@@ -785,6 +905,17 @@ impl AuthRepository {
             .await
             .map_err(|e| ApiError::Internal(format!("begin tx failed: {e}")))?;
 
+        let select_sql = format!("SELECT access_key_hash FROM {table} WHERE id = ? LIMIT 1");
+        let existing_hash: Option<String> = sqlx::query_scalar(&select_sql)
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| ApiError::Internal(format!("fetch token hash failed: {e}")))?;
+
+        let Some(hash) = existing_hash else {
+            return Err(ApiError::NotFound(format!("Token '{id}' not found")));
+        };
+
         sqlx::query("DELETE FROM permissions WHERE subject_type = ? AND subject_id = ?")
             .bind(subject_type)
             .bind(id)
@@ -792,8 +923,8 @@ impl AuthRepository {
             .await
             .map_err(|e| ApiError::Internal(format!("delete token permissions failed: {e}")))?;
 
-        let sql = format!("DELETE FROM {table} WHERE id = ?");
-        let res = sqlx::query(&sql)
+        let del_sql = format!("DELETE FROM {table} WHERE id = ?");
+        sqlx::query(&del_sql)
             .bind(id)
             .execute(&mut *tx)
             .await
@@ -803,10 +934,7 @@ impl AuthRepository {
             .await
             .map_err(|e| ApiError::Internal(format!("commit delete token failed: {e}")))?;
 
-        if res.rows_affected() == 0 {
-            return Err(ApiError::NotFound(format!("Token '{id}' not found")));
-        }
-        Ok(())
+        Ok(hash)
     }
 }
 

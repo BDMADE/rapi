@@ -15,6 +15,7 @@ import {
   DialogTrigger,
   Input,
   Select,
+  Switch,
   Tabs,
   TabsContent,
   TabsList,
@@ -75,6 +76,17 @@ export function UsersRolesPage() {
       pushToast({ title: "Administrator created", tone: "success" });
     },
     onError: (e: Error) => pushToast({ title: "Failed to create user", description: e.message, tone: "error" }),
+  });
+
+  const toggleActiveMut = useMutation({
+    mutationFn: ({ id, isActive }: { id: string; isActive: boolean }) =>
+      api.updateAdminUser(id, { isActive }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["admin-users"] });
+      pushToast({ title: "Administrator status updated", tone: "success" });
+    },
+    onError: (e: Error) =>
+      pushToast({ title: "Update failed", description: e.message, tone: "error" }),
   });
 
   const deleteUserMut = useMutation({
@@ -276,9 +288,18 @@ export function UsersRolesPage() {
                 key: "status",
                 header: "Status",
                 render: (u) => (
-                  <Badge tone={u.isActive ? "emerald" : "rose"}>
-                    {u.isActive ? "Active" : "Inactive"}
-                  </Badge>
+                  <div className="flex items-center gap-2">
+                    <Switch
+                      checked={u.isActive}
+                      onCheckedChange={(checked) =>
+                        toggleActiveMut.mutate({ id: u.id, isActive: checked })
+                      }
+                      disabled={toggleActiveMut.isPending}
+                    />
+                    <Badge tone={u.isActive ? "emerald" : "rose"}>
+                      {u.isActive ? "Active" : "Inactive"}
+                    </Badge>
+                  </div>
                 ),
               },
               {

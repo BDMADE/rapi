@@ -136,24 +136,15 @@ impl AuthService {
             });
         }
 
-        if self.repo.count_admin_users().await? > 0 {
-            return Err(ApiError::Conflict(
-                "Initial administrator already exists".to_string(),
-            ));
-        }
-
         let pw_hash = hash_password(&input.password)?;
         let user = self
             .repo
-            .create_admin_user(
+            .create_first_admin_atomic(
                 input.email.trim(),
                 input.username.as_deref(),
                 &pw_hash,
                 input.firstname.trim(),
                 input.lastname.trim(),
-                true,
-                true,
-                &["role_super_admin".to_string()],
             )
             .await?;
 
@@ -312,6 +303,8 @@ impl AuthService {
             }
         }
 
+        let _ = self.repo.touch_token_last_used(is_admin, &tok.id).await;
+
         let actor = if is_admin {
             Actor::AdminToken {
                 token_id: tok.id,
@@ -433,6 +426,27 @@ impl AuthService {
         id: &str,
         input: UpdateAdminUserInput,
     ) -> ApiResult<AdminUserDto> {
+        let Some(existing) = self.repo.find_admin_record_by_id(id).await? else {
+            return Err(ApiError::NotFound(format!("Admin user '{id}' not found")));
+        };
+
+        // Guard against removing or deactivating the last active Super Admin
+        let removing_super_role = input
+            .role_ids
+            .as_ref()
+            .is_some_and(|roles| !roles.iter().any(|r| r == "role_super_admin"));
+        let deactivating = input.is_active == Some(false);
+
+        if existing.is_super_admin
+            && existing.is_active
+            && (removing_super_role || deactivating)
+            && self.repo.count_active_super_admins().await? <= 1
+        {
+            return Err(ApiError::BadRequest(
+                "Cannot demote or deactivate the last active Super Admin".to_string(),
+            ));
+        }
+
         let pw_hash = match input.password.as_deref().filter(|p| !p.is_empty()) {
             Some(pw) => {
                 validate_password(pw)?;
@@ -440,7 +454,9 @@ impl AuthService {
             }
             None => None,
         };
-        self.repo
+
+        let updated = self
+            .repo
             .update_admin_user(
                 id,
                 input.firstname.as_deref(),
@@ -449,7 +465,14 @@ impl AuthService {
                 pw_hash.as_deref(),
                 input.role_ids.as_deref(),
             )
-            .await
+            .await?;
+
+        // Revoke active refresh sessions whenever password changes or account is deactivated
+        if pw_hash.is_some() || deactivating {
+            let _ = self.repo.delete_sessions_for_user("admin", id).await;
+        }
+
+        Ok(updated)
     }
 
     pub async fn delete_admin_user(&self, id: &str, acting_user_id: Option<&str>) -> ApiResult<()> {
@@ -458,6 +481,17 @@ impl AuthService {
                 "You cannot delete your own administrator account".to_string(),
             ));
         }
+        if let Some(existing) = self.repo.find_admin_record_by_id(id).await? {
+            if existing.is_super_admin
+                && existing.is_active
+                && self.repo.count_active_super_admins().await? <= 1
+            {
+                return Err(ApiError::BadRequest(
+                    "Cannot delete the last active Super Admin".to_string(),
+                ));
+            }
+        }
+        self.repo.delete_sessions_for_user("admin", id).await?;
         self.repo.delete_admin_user(id).await
     }
 
@@ -506,6 +540,9 @@ impl AuthService {
         role_id: &str,
         rules: &[PermissionRule],
     ) -> ApiResult<Vec<PermissionRule>> {
+        if !self.repo.role_exists(role_id).await? {
+            return Err(ApiError::NotFound(format!("Role '{role_id}' not found")));
+        }
         let updated = self
             .repo
             .replace_subject_permissions("admin_role", role_id, rules)
@@ -583,7 +620,10 @@ impl AuthService {
     }
 
     pub async fn delete_token(&self, is_admin_token: bool, id: &str) -> ApiResult<()> {
-        self.repo.delete_token(is_admin_token, id).await
+        let hash = self.repo.delete_token(is_admin_token, id).await?;
+        // Immediately evict revoked token from cache so it cannot be used during TTL window
+        let _ = self.cache.delete(&format!("rapi:token:{hash}")).await;
+        Ok(())
     }
 
     // --- Helpers ---
