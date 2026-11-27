@@ -1,12 +1,15 @@
 import { zodResolver } from "@hookform/resolvers/zod";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ShieldCheck } from "lucide-react";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { z } from "zod";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { useAuthStore } from "@/features/auth/auth-store";
+import { api } from "@/lib/api";
 
 const loginSchema = z.object({
   email: z.string().email("Enter a valid administrator email"),
@@ -16,7 +19,11 @@ const loginSchema = z.object({
 type LoginValues = z.infer<typeof loginSchema>;
 
 export function LoginPage() {
-  const [notice, setNotice] = useState<string | null>(null);
+  const navigate = useNavigate();
+  const setSession = useAuthStore((s) => s.setSession);
+  const queryClient = useQueryClient();
+  const [serverError, setServerError] = useState<string | null>(null);
+
   const {
     register,
     handleSubmit,
@@ -25,10 +32,21 @@ export function LoginPage() {
     resolver: zodResolver(loginSchema),
   });
 
+  const loginMutation = useMutation({
+    mutationFn: api.login,
+    onSuccess: (data) => {
+      setSession(data);
+      queryClient.invalidateQueries();
+      navigate("/", { replace: true });
+    },
+    onError: (err: Error) => {
+      setServerError(err.message);
+    },
+  });
+
   const onSubmit = (values: LoginValues) => {
-    setNotice(
-      `Credentials validated for ${values.email}. JWT issuance & Argon2 verification wire up in Phase 1.`,
-    );
+    setServerError(null);
+    loginMutation.mutate(values);
   };
 
   return (
@@ -41,17 +59,17 @@ export function LoginPage() {
             </div>
             <span className="text-sm font-semibold text-zinc-900">RAPI Admin</span>
           </div>
-          <Badge tone="mono">Phase 0 Shell</Badge>
+          <Badge tone="mono">JWT + Argon2id</Badge>
         </div>
 
         <h1 className="text-base font-semibold text-zinc-900">Sign in to workspace</h1>
         <p className="mt-1 text-xs text-zinc-600">
-          Use your administrator credentials to manage schemas and documents.
+          Use your administrator credentials to manage schemas, documents, and tokens.
         </p>
 
-        {notice && (
-          <div className="mt-4 rounded border border-indigo-200 bg-indigo-50 p-2.5 text-xs text-indigo-900">
-            {notice}
+        {serverError && (
+          <div className="mt-4 rounded border border-rose-200 bg-rose-50 p-2.5 text-xs text-rose-800">
+            {serverError}
           </div>
         )}
 
@@ -76,8 +94,8 @@ export function LoginPage() {
             )}
           </div>
 
-          <Button type="submit" className="w-full">
-            Sign in
+          <Button type="submit" className="w-full" disabled={loginMutation.isPending}>
+            {loginMutation.isPending ? "Signing in..." : "Sign in"}
           </Button>
         </form>
 
@@ -113,7 +131,7 @@ export function ForgotPasswordPage() {
       <div className="w-full max-w-sm rounded-md border border-zinc-200 bg-white p-6">
         <h1 className="text-base font-semibold text-zinc-900">Reset password</h1>
         <p className="mt-1 text-xs text-zinc-600">
-          Enter your email to receive a signed one-time recovery link via SMTP.
+          Enter your email to receive a signed one-time recovery link once SMTP is configured.
         </p>
 
         {sent && (
@@ -124,7 +142,7 @@ export function ForgotPasswordPage() {
 
         <form
           onSubmit={handleSubmit((d) =>
-            setSent(`If an account exists for ${d.email}, a reset token will be dispatched.`),
+            setSent(`If an account exists for ${d.email}, a recovery link will be dispatched.`),
           )}
           className="mt-4 space-y-3.5"
           noValidate
@@ -133,7 +151,12 @@ export function ForgotPasswordPage() {
             <label htmlFor="fp-email" className="mb-1 block text-xs font-medium text-zinc-700">
               Email address
             </label>
-            <Input id="fp-email" type="email" placeholder="admin@example.com" {...register("email")} />
+            <Input
+              id="fp-email"
+              type="email"
+              placeholder="admin@example.com"
+              {...register("email")}
+            />
             {errors.email && (
               <p className="mt-1 text-[11px] text-rose-600">{errors.email.message}</p>
             )}
@@ -173,7 +196,11 @@ const onboardingSchema = z
 type OnboardingValues = z.infer<typeof onboardingSchema>;
 
 export function OnboardingPage() {
-  const [notice, setNotice] = useState<string | null>(null);
+  const navigate = useNavigate();
+  const setSession = useAuthStore((s) => s.setSession);
+  const queryClient = useQueryClient();
+  const [serverError, setServerError] = useState<string | null>(null);
+
   const {
     register,
     handleSubmit,
@@ -182,10 +209,26 @@ export function OnboardingPage() {
     resolver: zodResolver(onboardingSchema),
   });
 
+  const registerMutation = useMutation({
+    mutationFn: api.registerAdmin,
+    onSuccess: (data) => {
+      setSession(data);
+      queryClient.invalidateQueries();
+      navigate("/", { replace: true });
+    },
+    onError: (err: Error) => {
+      setServerError(err.message);
+    },
+  });
+
   const onSubmit = (values: OnboardingValues) => {
-    setNotice(
-      `Super Admin profile validated for ${values.firstname} (${values.email}). Ready for Phase 1 POST /admin/register-admin.`,
-    );
+    setServerError(null);
+    registerMutation.mutate({
+      email: values.email,
+      password: values.password,
+      firstname: values.firstname,
+      lastname: values.lastname ?? "",
+    });
   };
 
   return (
@@ -198,13 +241,13 @@ export function OnboardingPage() {
 
         <h1 className="text-base font-semibold text-zinc-900">Create your first administrator</h1>
         <p className="mt-1 text-xs text-zinc-600">
-          This account receives the built-in <code className="font-mono">strapi-super-admin</code> role
-          seeded in SQLite.
+          This account receives the built-in <code className="font-mono">strapi-super-admin</code>{" "}
+          role seeded in SQLite.
         </p>
 
-        {notice && (
-          <div className="mt-4 rounded border border-emerald-200 bg-emerald-50 p-2.5 text-xs text-emerald-900">
-            {notice}
+        {serverError && (
+          <div className="mt-4 rounded border border-rose-200 bg-rose-50 p-2.5 text-xs text-rose-800">
+            {serverError}
           </div>
         )}
 
@@ -231,7 +274,12 @@ export function OnboardingPage() {
             <label htmlFor="ob-email" className="mb-1 block text-xs font-medium text-zinc-700">
               Email
             </label>
-            <Input id="ob-email" type="email" placeholder="ada@rapi.local" {...register("email")} />
+            <Input
+              id="ob-email"
+              type="email"
+              placeholder="ada@rapi.local"
+              {...register("email")}
+            />
             {errors.email && (
               <p className="mt-1 text-[11px] text-rose-600">{errors.email.message}</p>
             )}
@@ -239,7 +287,10 @@ export function OnboardingPage() {
 
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label htmlFor="ob-password" className="mb-1 block text-xs font-medium text-zinc-700">
+              <label
+                htmlFor="ob-password"
+                className="mb-1 block text-xs font-medium text-zinc-700"
+              >
                 Password
               </label>
               <Input id="ob-password" type="password" {...register("password")} />
@@ -248,7 +299,10 @@ export function OnboardingPage() {
               )}
             </div>
             <div>
-              <label htmlFor="confirmPassword" className="mb-1 block text-xs font-medium text-zinc-700">
+              <label
+                htmlFor="confirmPassword"
+                className="mb-1 block text-xs font-medium text-zinc-700"
+              >
                 Confirm password
               </label>
               <Input id="confirmPassword" type="password" {...register("confirmPassword")} />
@@ -258,14 +312,14 @@ export function OnboardingPage() {
             </div>
           </div>
 
-          <Button type="submit" className="w-full">
-            Initialize administrator
+          <Button type="submit" className="w-full" disabled={registerMutation.isPending}>
+            {registerMutation.isPending ? "Creating account..." : "Initialize administrator"}
           </Button>
         </form>
 
         <div className="mt-4 text-center text-xs text-zinc-500">
-          <Link to="/" className="hover:text-zinc-900">
-            Back to overview
+          <Link to="/login" className="hover:text-zinc-900">
+            Already have an account? Sign in
           </Link>
         </div>
       </div>

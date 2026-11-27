@@ -1,3 +1,4 @@
+use crate::auth::{admin_auth_routes, enforce_permission, RequireAdmin};
 use crate::error::HttpApiError;
 use crate::openapi::ApiDoc;
 use axum::extract::{DefaultBodyLimit, State};
@@ -40,7 +41,8 @@ pub fn build_router(services: ServiceContainer) -> Router {
         .route("/ready", get(ready_handler))
         .route("/api", get(api_index_handler))
         .route("/admin/init", get(admin_init_handler))
-        .route("/admin/system/overview", get(system_overview_handler));
+        .route("/admin/system/overview", get(system_overview_handler))
+        .merge(admin_auth_routes());
 
     if enable_docs {
         router = router
@@ -153,13 +155,9 @@ pub async fn admin_init_handler(
 )]
 pub async fn system_overview_handler(
     State(services): State<ServiceContainer>,
+    RequireAdmin(actor): RequireAdmin,
 ) -> Result<Json<ApiResponse<SystemOverviewDto>>, HttpApiError> {
-    // In production, block unauthenticated telemetry disclosure until Phase 1 Admin JWT auth lands.
-    if services.config.is_production() {
-        return Err(HttpApiError(ApiError::Unauthorized(
-            "Authentication required for /admin/system/overview".to_string(),
-        )));
-    }
+    enforce_permission(&actor, "admin::system.overview.read", None)?;
     let dto = services.system.overview().await?;
     Ok(Json(ApiResponse::new(dto)))
 }
@@ -385,5 +383,486 @@ mod tests {
         assert!(nf_json["data"].is_null());
         assert_eq!(nf_json["error"]["status"], 404);
         assert_eq!(nf_json["error"]["name"], "NotFoundError");
+    }
+
+    #[tokio::test]
+    async fn full_phase1_auth_rbac_and_tokens_lifecycle() {
+        let app = test_router().await;
+
+        // 1. Unauthenticated access to /admin/users fails with 401
+        let unauth = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/users")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        // 2. Register first Super Admin
+        let reg_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/register-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "email": "ada@rapi.dev",
+                            "password": "Password123!",
+                            "firstname": "Ada",
+                            "lastname": "Lovelace"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reg_res.status(), StatusCode::OK);
+        let reg_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(reg_res.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let super_jwt = reg_json["data"]["token"].as_str().unwrap().to_string();
+        let refresh_tok = reg_json["data"]["refreshToken"].as_str().unwrap().to_string();
+        assert_eq!(reg_json["data"]["user"]["isSuperAdmin"], true);
+
+        // 3. Duplicate first-admin registration must fail with 409 Conflict
+        let dup_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/register-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "email": "second@rapi.dev",
+                            "password": "Password123!",
+                            "firstname": "Second"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(dup_res.status(), StatusCode::CONFLICT);
+
+        // 4. Refresh token rotates and invalidates the old refresh token
+        let ref_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/refresh-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "refreshToken": refresh_tok }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ref_res.status(), StatusCode::OK);
+
+        let replay_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/refresh-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "refreshToken": refresh_tok }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replay_res.status(), StatusCode::UNAUTHORIZED);
+
+        // 5. Create custom restricted admin user (role_author has zero admin::users.read permission)
+        let create_u = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/users")
+                    .header("authorization", format!("Bearer {super_jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "email": "author@rapi.dev",
+                            "password": "Password123!",
+                            "firstname": "Grace",
+                            "roleIds": ["role_author"]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_u.status(), StatusCode::OK);
+
+        // Login as author
+        let author_login = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/login")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "email": "author@rapi.dev",
+                            "password": "Password123!"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(author_login.status(), StatusCode::OK);
+        let author_json: serde_json::Value = serde_json::from_slice(
+            &to_bytes(author_login.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        let author_jwt = author_json["data"]["token"].as_str().unwrap().to_string();
+
+        // Author cannot read admin users (403 Forbidden)
+        let forbidden = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/users")
+                    .header("authorization", format!("Bearer {author_jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+        // Grant `admin::users.read` to `role_author` via RBAC matrix
+        let grant = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/roles/role_author/permissions")
+                    .header("authorization", format!("Bearer {super_jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "permissions": [{ "action": "admin::users.read" }]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(grant.status(), StatusCode::OK);
+
+        // Author can now read admin users (200 OK)
+        let allowed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/users")
+                    .header("authorization", format!("Bearer {author_jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(allowed.status(), StatusCode::OK);
+
+        // 6. Issue a read-only Admin Token and verify read works while write is 403
+        let tok_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/admin-tokens")
+                    .header("authorization", format!("Bearer {super_jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "CI ReadOnly",
+                            "description": "Read telemetry",
+                            "type": "read-only"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(tok_res.status(), StatusCode::OK);
+        let tok_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(tok_res.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let raw_admin_token = tok_json["data"]["accessKey"].as_str().unwrap().to_string();
+        assert!(raw_admin_token.starts_with("rapi_adm_"));
+
+        let ro_overview = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/system/overview")
+                    .header("authorization", format!("Bearer {raw_admin_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ro_overview.status(), StatusCode::OK);
+
+        let ro_write = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/roles")
+                    .header("authorization", format!("Bearer {raw_admin_token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::json!({ "name": "Nope" }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ro_write.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn phase1_security_regressions() {
+        let app = test_router().await;
+
+        // Seed Super Admin
+        let reg = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/register-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "email": "root@rapi.dev",
+                            "password": "Password123!",
+                            "firstname": "Root"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let reg_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(reg.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let jwt = reg_json["data"]["token"].as_str().unwrap().to_string();
+        let root_id = reg_json["data"]["user"]["id"].as_str().unwrap().to_string();
+        let old_refresh = reg_json["data"]["refreshToken"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // BUG-P1-01: Revoked token must be immediately rejected even after being cached
+        let tok_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/admin-tokens")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "Temp Admin Token",
+                            "type": "full-access"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let tok_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(tok_res.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let tok_id = tok_json["data"]["id"].as_str().unwrap().to_string();
+        let raw_tok = tok_json["data"]["accessKey"].as_str().unwrap().to_string();
+
+        // Warm cache with valid request
+        let ok_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/system/overview")
+                    .header("authorization", format!("Bearer {raw_tok}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok_res.status(), StatusCode::OK);
+
+        // Revoke token and immediately verify it returns 401
+        let del_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/admin/admin-tokens/{tok_id}"))
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del_res.status(), StatusCode::OK);
+
+        let revoked_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/system/overview")
+                    .header("authorization", format!("Bearer {raw_tok}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(revoked_res.status(), StatusCode::UNAUTHORIZED);
+
+        // BUG-P1-06: Deactivating the last active Super Admin must fail with 400
+        let lock_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/admin/users/{root_id}"))
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "isActive": false }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(lock_res.status(), StatusCode::BAD_REQUEST);
+
+        // BUG-P1-02: Changing password must immediately invalidate old refresh tokens
+        let pw_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/users/me")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "password": "NewPassword456!" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(pw_res.status(), StatusCode::OK);
+
+        let stale_ref = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/refresh-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "refreshToken": old_refresh }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stale_ref.status(), StatusCode::UNAUTHORIZED);
+
+        // BUG-P1-09: Unknown roleId returns 400 BadRequest (not 500)
+        let bad_role = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/users")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "email": "badrole@rapi.dev",
+                            "password": "Password123!",
+                            "firstname": "Bad",
+                            "roleIds": ["role_does_not_exist"]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bad_role.status(), StatusCode::BAD_REQUEST);
+
+        // BUG-P1-10: Updating permissions on non-existent role returns 404
+        let missing_role = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/roles/role_missing/permissions")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "permissions": [] }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing_role.status(), StatusCode::NOT_FOUND);
+
+        // BUG-P1-04: Per-email rate limit triggers 429 even if X-Forwarded-For is spoofed every attempt
+        let mut hit_429 = false;
+        for attempt in 0..12 {
+            let res = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/admin/login")
+                        .header("x-forwarded-for", format!("10.0.0.{attempt}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "email": "root@rapi.dev",
+                                "password": "wrong-password"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if res.status() == StatusCode::TOO_MANY_REQUESTS {
+                hit_429 = true;
+                break;
+            }
+        }
+        assert!(hit_429, "Expected per-email rate limit to trigger 429");
     }
 }
