@@ -19,3 +19,5 @@ utoipa.workspace = true
 [dev-dependencies]
 tokio.workspace = true
 cms-db.workspace = true
+image.workspace = true
+uuid.workspace = true

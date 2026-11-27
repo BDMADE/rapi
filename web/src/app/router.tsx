@@ -8,6 +8,7 @@ import { ContentManagerPage } from "@/features/content-manager/content-manager-p
 import { EntryEditorPage } from "@/features/content-manager/entry-editor-page";
 import { ContentTypeBuilderPage } from "@/features/content-type-builder/builder-page";
 import { OverviewPage } from "@/features/dashboard/overview-page";
+import { MediaLibraryPage } from "@/features/media/media-library-page";
 import { ModulePlaceholderPage } from "@/features/placeholders/workspace-views";
 import { TokensPage } from "@/features/settings/tokens-page";
 import { UsersRolesPage } from "@/features/users-roles/users-roles-page";
@@ -52,7 +53,7 @@ export const router = createBrowserRouter([
       },
       {
         path: "media-library",
-        element: <ModulePlaceholderPage moduleKey="media-library" />,
+        element: <MediaLibraryPage />,
       },
       {
         path: "users",

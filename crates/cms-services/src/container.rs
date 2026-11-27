@@ -1,14 +1,15 @@
 use crate::auth::AuthService;
 use crate::content::ContentService;
+use crate::media::MediaService;
 use crate::schema::SchemaService;
 use crate::system::SystemService;
 use cms_core::{
-    ApiResult, AppConfig, CacheBackend, InMemoryCacheBackend, LocalPubSubBackend, PubSubBackend,
-    QueueBackend,
+    ApiResult, AppConfig, CacheBackend, InMemoryCacheBackend, LocalDiskProvider,
+    LocalPubSubBackend, PubSubBackend, QueueBackend,
 };
 use cms_db::{
-    AuthRepository, DbPools, DynamicRepository, PlatformRepository, RedisRuntime, SchemaEngine,
-    SqliteQueueBackend,
+    AuthRepository, DbPools, DynamicRepository, MediaRepository, PlatformRepository, RedisRuntime,
+    SchemaEngine, SqliteQueueBackend,
 };
 use cms_plugin_api::PluginRegistry;
 use std::sync::Arc;
@@ -27,6 +28,7 @@ pub struct ServiceContainer {
     pub auth: AuthService,
     pub schema: SchemaService,
     pub content: ContentService,
+    pub media: MediaService,
     pub started_at: Instant,
 }
 
@@ -75,6 +77,9 @@ impl ServiceContainer {
         let schema = SchemaService::new(schema_engine.clone(), cache.clone(), pubsub.clone());
         let dynamic_repo = DynamicRepository::new(db.clone(), schema_engine);
         let content = ContentService::new(dynamic_repo, schema.clone(), pubsub.clone());
+        let storage = Arc::new(LocalDiskProvider::new(&config.upload_dir)?);
+        let media_repo = MediaRepository::new(db.clone());
+        let media = MediaService::new(media_repo, storage, queue.clone());
 
         Ok(Self {
             config,
@@ -87,6 +92,7 @@ impl ServiceContainer {
             auth,
             schema,
             content,
+            media,
             started_at,
         })
     }

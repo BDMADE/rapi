@@ -280,6 +280,52 @@ export type ContentDocument = Record<string, unknown> & {
   updatedAt: string;
 };
 
+export interface MediaFormatVariant {
+  name: string;
+  hash: string;
+  ext: string;
+  mime: string;
+  width: number;
+  height: number;
+  size: number;
+  url: string;
+}
+
+export interface MediaFileDto {
+  id: number;
+  documentId: string;
+  name: string;
+  alternativeText: string | null;
+  caption: string | null;
+  width: number | null;
+  height: number | null;
+  formats: Record<string, MediaFormatVariant>;
+  hash: string;
+  ext: string;
+  mime: string;
+  size: number;
+  url: string;
+  previewUrl: string | null;
+  provider: string;
+  folderId: number | null;
+  folderPath: string;
+  usageCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MediaFolderDto {
+  id: number;
+  name: string;
+  pathId: number;
+  path: string;
+  parentId: number | null;
+  fileCount: number;
+  childCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 
 // Deduplicates concurrent 401 refresh attempts so single-use refresh token rotation
@@ -685,4 +731,129 @@ export const api = {
         { method: "POST" },
       )
     ).data,
+
+  // Media Library
+  listMediaFiles: async (
+    params: {
+      folderId?: number | "root";
+      mimePrefix?: string;
+      q?: string;
+      page?: number;
+      pageSize?: number;
+    } = {},
+  ) => {
+    const qs = new URLSearchParams();
+    if (params.folderId !== undefined) qs.set("folderId", String(params.folderId));
+    if (params.mimePrefix) qs.set("mimePrefix", params.mimePrefix);
+    if (params.q) qs.set("_q", params.q);
+    if (params.page) qs.set("page", String(params.page));
+    if (params.pageSize) qs.set("pageSize", String(params.pageSize));
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return requestJson<ApiResponse<MediaFileDto[]>>(`/admin/media/files${suffix}`);
+  },
+
+  uploadMediaFiles: async (files: File[], folderId?: number | null) => {
+    const buildForm = () => {
+      const form = new FormData();
+      if (folderId !== undefined && folderId !== null) {
+        form.append("folderId", String(folderId));
+      }
+      for (const f of files) {
+        form.append("files", f);
+      }
+      return form;
+    };
+
+    const doUpload = async (token: string | null) =>
+      fetch(`${API_BASE}/admin/media/upload`, {
+        method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        body: buildForm(),
+      });
+
+    let res = await doUpload(useAuthStore.getState().token);
+    if (res.status === 401) {
+      const refreshed = await tryRefreshSession();
+      if (refreshed) {
+        res = await doUpload(refreshed);
+      }
+    }
+    if (!res.ok) {
+      let msg = `HTTP ${res.status}`;
+      try {
+        const errBody = (await res.json()) as ApiErrorEnvelope;
+        if (errBody?.error?.message) msg = errBody.error.message;
+      } catch {
+        // fallback
+      }
+      throw new Error(msg);
+    }
+    const json = (await res.json()) as ApiResponse<MediaFileDto[]>;
+    return json.data;
+  },
+
+  updateMediaFile: async (
+    id: number,
+    payload: {
+      name?: string;
+      alternativeText?: string;
+      caption?: string;
+      folderId?: number;
+      moveToRoot?: boolean;
+    },
+  ) =>
+    (
+      await requestJson<ApiResponse<MediaFileDto>>(`/admin/media/files/${id}`, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      })
+    ).data,
+
+  cropMediaFile: async (
+    id: number,
+    payload: {
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+      resizeWidth?: number;
+      resizeHeight?: number;
+    },
+  ) =>
+    (
+      await requestJson<ApiResponse<MediaFileDto>>(`/admin/media/files/${id}/crop`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      })
+    ).data,
+
+  deleteMediaFile: async (id: number, force = false) =>
+    requestJson<ApiResponse<MediaFileDto>>(
+      `/admin/media/files/${id}${force ? "?force=true" : ""}`,
+      { method: "DELETE" },
+    ),
+
+  listMediaFolders: async () =>
+    (await requestJson<ApiResponse<MediaFolderDto[]>>("/admin/media/folders")).data,
+
+  createMediaFolder: async (name: string, parentId?: number | null) =>
+    (
+      await requestJson<ApiResponse<MediaFolderDto>>("/admin/media/folders", {
+        method: "POST",
+        body: JSON.stringify({ name, parentId: parentId ?? null }),
+      })
+    ).data,
+
+  renameMediaFolder: async (id: number, name: string) =>
+    (
+      await requestJson<ApiResponse<MediaFolderDto>>(`/admin/media/folders/${id}`, {
+        method: "PUT",
+        body: JSON.stringify({ name }),
+      })
+    ).data,
+
+  deleteMediaFolder: async (id: number) =>
+    requestJson<ApiResponse<{ deleted: number }>>(`/admin/media/folders/${id}`, {
+      method: "DELETE",
+    }),
 };

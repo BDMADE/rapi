@@ -32,6 +32,7 @@ import {
   DynamicZoneEditor,
 } from "@/features/content-manager/dynamic-zone-editor";
 import { RelationPicker } from "@/features/content-manager/relation-picker";
+import { MediaPicker } from "@/features/media/media-picker";
 import { api, type ContentTypeSchema, type FieldDefinition } from "@/lib/api";
 
 function isFieldVisible(field: FieldDefinition, values: Record<string, unknown>): boolean {
@@ -689,20 +690,10 @@ function FieldRenderer({
       return (
         <div>
           {labelRow}
-          <Input
-            type="number"
-            placeholder="Media asset ID (Media Library picker unlocks in Phase 4)"
-            value={
-              typeof value === "number"
-                ? String(value)
-                : typeof value === "object" && value !== null && "id" in value
-                  ? String((value as { id: number }).id)
-                  : ""
-            }
-            onChange={(e) => {
-              const raw = e.target.value;
-              onChange(raw === "" ? null : Number(raw));
-            }}
+          <MediaPicker
+            multiple={Boolean(field.validation?.multiple)}
+            value={value}
+            onChange={onChange}
           />
         </div>
       );

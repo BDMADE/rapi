@@ -1,6 +1,7 @@
 use crate::auth::{admin_auth_routes, enforce_permission, RequireAdmin};
 use crate::content::content_api_routes;
 use crate::error::HttpApiError;
+use crate::media::media_routes;
 use crate::openapi::ApiDoc;
 use crate::schema::admin_schema_routes;
 use axum::extract::{DefaultBodyLimit, State};
@@ -46,6 +47,7 @@ pub fn build_router(services: ServiceContainer) -> Router {
         .route("/admin/system/overview", get(system_overview_handler))
         .merge(admin_auth_routes())
         .merge(admin_schema_routes())
+        .merge(media_routes())
         .merge(content_api_routes());
 
     if enable_docs {
@@ -266,6 +268,10 @@ mod tests {
         cfg.database_url = "sqlite::memory:".to_string();
         cfg.redis_url = None;
         cfg.enable_docs = true;
+        cfg.upload_dir = std::env::temp_dir()
+            .join(format!("rapi_test_uploads_{}", uuid::Uuid::new_v4()))
+            .to_string_lossy()
+            .to_string();
         let services = ServiceContainer::bootstrap(cfg).await.unwrap();
         build_router(services)
     }
@@ -1757,5 +1763,385 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(clear_req.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn phase4_media_upload_crop_reference_populate_and_usage_guard() {
+        let app = test_router().await;
+
+        let reg = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/register-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "email": "media@rapi.dev",
+                            "password": "Password123!",
+                            "firstname": "Media"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let reg_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(reg.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let jwt = reg_json["data"]["token"].as_str().unwrap().to_string();
+
+        // 1. Create folder "Banners"
+        let folder_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/media/folders")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::json!({ "name": "Banners" }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(folder_res.status(), StatusCode::OK);
+        let folder_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(folder_res.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let folder_id = folder_json["data"]["id"].as_i64().unwrap();
+
+        // 2. Generate a real 320x200 PNG image in memory & upload via multipart
+        let img = image::DynamicImage::new_rgb8(320, 200);
+        let mut png_bytes = Vec::new();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut png_bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+
+        let boundary = "----RapiTestBoundary7MA4YWxkTrZu0gW";
+        let mut mp = Vec::new();
+        mp.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"fileInfo\"\r\n\r\n{{\"alternativeText\":\"Hero banner\",\"folderId\":{folder_id}}}\r\n"
+            )
+            .as_bytes(),
+        );
+        mp.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"files\"; filename=\"hero-banner.png\"\r\nContent-Type: image/png\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        mp.extend_from_slice(&png_bytes);
+        mp.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+        let up_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/media/upload")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(mp))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(up_res.status(), StatusCode::OK);
+        let up_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(up_res.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let file_obj = &up_json["data"][0];
+        let file_id = file_obj["id"].as_i64().unwrap();
+        let file_url = file_obj["url"].as_str().unwrap().to_string();
+        assert_eq!(file_obj["width"], 320);
+        assert_eq!(file_obj["height"], 200);
+        assert!(file_obj["formats"]["thumbnail"]["url"].is_string());
+
+        // 3. Verify static `/uploads/...` serves bytes with CSP sandbox + nosniff
+        let serve_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&file_url)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(serve_res.status(), StatusCode::OK);
+        assert_eq!(serve_res.headers()["x-content-type-options"], "nosniff");
+        assert!(serve_res.headers().contains_key("content-security-policy"));
+
+        // 4. Crop image to 160x100
+        let crop_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/admin/media/files/{file_id}/crop"))
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "x": 10, "y": 10, "width": 160, "height": 100 })
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(crop_res.status(), StatusCode::OK);
+        let crop_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(crop_res.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(crop_json["data"]["width"], 160);
+        assert_eq!(crop_json["data"]["height"], 100);
+
+        // 5. Reference in a Content Type & populate via REST `/api/slides?populate=*`!
+        let _ = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/content-types")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "uid": "api::slide.slide",
+                            "kind": "collectionType",
+                            "singularName": "slide",
+                            "pluralName": "slides",
+                            "displayName": "Slide",
+                            "draftAndPublish": false,
+                            "fields": [
+                                { "name": "caption", "fieldType": "string", "required": true },
+                                { "name": "image", "fieldType": "media" }
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let create_slide = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/slides")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "data": { "caption": "Main Slide", "image": file_id }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_slide.status(), StatusCode::OK);
+
+        let pop_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/slides?populate=*")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(pop_res.status(), StatusCode::OK);
+        let pop_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(pop_res.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(pop_json["data"][0]["image"]["id"], file_id);
+        assert_eq!(pop_json["data"][0]["image"]["width"], 160);
+
+        // 6. Deleting an in-use media asset without `?force=true` must return 409 Conflict!
+        let del_blocked = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/admin/media/files/{file_id}"))
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del_blocked.status(), StatusCode::CONFLICT);
+
+        // Blocking dangerous executable extension (.html)
+        let mut bad_mp = Vec::new();
+        bad_mp.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"files\"; filename=\"xss.html\"\r\nContent-Type: text/html\r\n\r\n<script>alert(1)</script>\r\n--{boundary}--\r\n"
+            )
+            .as_bytes(),
+        );
+        let bad_up = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/media/upload")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(bad_mp))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bad_up.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn phase4_security_and_parity_regressions() {
+        let app = test_router().await;
+        let reg = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/register-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "email": "p4sec@rapi.local",
+                            "firstname": "P4Sec",
+                            "password": "StrongPassword123!"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let reg_body = axum::body::to_bytes(reg.into_body(), usize::MAX).await.unwrap();
+        let jwt = serde_json::from_slice::<serde_json::Value>(&reg_body).unwrap()["data"]["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let boundary = "----RapiP4SecBoundary";
+
+        // BUG-P4-02: Blocked .phtml extension rejected
+        let phtml_mp = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"files\"; filename=\"shell.phtml\"\r\nContent-Type: image/png\r\n\r\n<?php echo 1; ?>\r\n--{boundary}--\r\n"
+        );
+        let phtml_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/media/upload")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", format!("multipart/form-data; boundary={boundary}"))
+                    .body(Body::from(phtml_mp))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(phtml_res.status(), StatusCode::BAD_REQUEST);
+
+        // BUG-P4-02: Spoofed Content-Type on a plain text file does NOT become image/png
+        let txt_mp = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"files\"; filename=\"note.txt\"\r\nContent-Type: image/png\r\n\r\nhello plain text\r\n--{boundary}--\r\n"
+        );
+        let txt_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/media/upload")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", format!("multipart/form-data; boundary={boundary}"))
+                    .body(Body::from(txt_mp))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(txt_res.status(), StatusCode::OK);
+        let txt_json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(txt_res.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        let file_id = txt_json["data"][0]["id"].as_i64().unwrap();
+        assert_eq!(txt_json["data"][0]["mime"], "text/plain");
+
+        // BUG-P4-06: Punctuation-only search does not leak all files
+        let punct_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/media/files?q=???")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(punct_res.status(), StatusCode::OK);
+        let punct_json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(punct_res.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(punct_json["data"].as_array().unwrap().len(), 0);
+
+        // BUG-P4-01: Strapi v5 DELETE /api/upload/files/{id} works with full-access API token
+        let tok_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/api-tokens")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "Upload Full",
+                            "type": "full-access"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let tok_json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(tok_res.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        let api_token = tok_json["data"]["accessKey"].as_str().unwrap().to_string();
+
+        let del_pub = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/upload/files/{file_id}"))
+                    .header("authorization", format!("Bearer {api_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del_pub.status(), StatusCode::OK);
     }
 }

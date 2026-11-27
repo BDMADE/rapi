@@ -3,6 +3,7 @@ pub mod config;
 pub mod content;
 pub mod error;
 pub mod id;
+pub mod media;
 pub mod models;
 pub mod response;
 pub mod runtime;
@@ -15,6 +16,10 @@ pub use auth::{
 pub use content::{
     ContentVersionDto, DocumentQuery, PopulateFieldOpts, PopulateSpec, RelationConnectItem,
     RelationMutation, RelationPosition, SortSpec,
+};
+pub use media::{
+    sanitize_filename, validate_storage_key, LocalDiskProvider, MediaFileDto, MediaFolderDto,
+    MediaFormatVariant, MediaListFilter, StorageProvider,
 };
 pub use schema::{
     fts_table_name_for_uid, table_name_for_uid, validate_field_identifier, validate_schema_uid,
