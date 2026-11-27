@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod config;
+pub mod content;
 pub mod error;
 pub mod id;
 pub mod models;
@@ -10,6 +11,10 @@ pub mod schema;
 pub use auth::{
     builtin_permission_catalog, Actor, AdminRoleDto, AdminRoleSummary, AdminUserDto, ApiTokenDto,
     AuthTokenResponse, CreatedTokenDto, PermissionCatalogItem, PermissionRule, TokenType,
+};
+pub use content::{
+    ContentVersionDto, DocumentQuery, PopulateFieldOpts, PopulateSpec, RelationConnectItem,
+    RelationMutation, RelationPosition, SortSpec,
 };
 pub use schema::{
     fts_table_name_for_uid, table_name_for_uid, validate_field_identifier, validate_schema_uid,

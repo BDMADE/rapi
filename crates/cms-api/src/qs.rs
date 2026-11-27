@@ -1,4 +1,6 @@
-use cms_core::{ApiError, ApiResult, DocumentStatus};
+use cms_core::{
+    ApiError, ApiResult, DocumentQuery, DocumentStatus, PopulateFieldOpts, PopulateSpec, SortSpec,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -20,6 +22,8 @@ pub struct ContentQueryParams {
     pub locale: Option<String>,
     #[serde(default)]
     pub status: Option<DocumentStatus>,
+    #[serde(default, alias = "_q")]
+    pub q: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -57,6 +61,10 @@ pub struct PaginationQuery {
     pub page: u64,
     #[serde(default = "default_page_size")]
     pub page_size: u64,
+    #[serde(default)]
+    pub start: Option<u64>,
+    #[serde(default)]
+    pub limit: Option<u64>,
     #[serde(default = "default_with_count")]
     pub with_count: bool,
 }
@@ -66,6 +74,8 @@ impl Default for PaginationQuery {
         Self {
             page: default_page(),
             page_size: default_page_size(),
+            start: None,
+            limit: None,
             with_count: default_with_count(),
         }
     }
@@ -92,6 +102,107 @@ impl ContentQueryParams {
             .deserialize_str(raw)
             .map_err(|e| ApiError::BadRequest(format!("Invalid query parameters: {e}")))
     }
+
+    pub fn into_document_query(self) -> DocumentQuery {
+        let populate = match self.populate {
+            None => PopulateSpec::None,
+            Some(PopulateParam::Wildcard(s)) if s == "*" || s == "true" => PopulateSpec::All,
+            Some(PopulateParam::Wildcard(field)) => {
+                let mut map = BTreeMap::new();
+                for part in field.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+                    map.insert(part.to_string(), PopulateFieldOpts::default());
+                }
+                PopulateSpec::Fields(map)
+            }
+            Some(PopulateParam::List(list)) => {
+                if list.iter().any(|s| s == "*") {
+                    PopulateSpec::All
+                } else {
+                    let mut map = BTreeMap::new();
+                    for f in list {
+                        map.insert(f, PopulateFieldOpts::default());
+                    }
+                    PopulateSpec::Fields(map)
+                }
+            }
+            Some(PopulateParam::Map(raw_map)) => {
+                // Note: serde_qs may parse `populate[0]=a&populate[1]=b` as a Map with numeric keys!
+                if raw_map.keys().all(|k| k.chars().all(|c| c.is_ascii_digit())) {
+                    let mut map = BTreeMap::new();
+                    for val in raw_map.values() {
+                        if let Some(s) = val.as_str() {
+                            if s == "*" {
+                                return DocumentQuery {
+                                    populate: PopulateSpec::All,
+                                    filters: self.filters,
+                                    fields: self.fields.map(StringOrList::into_vec).unwrap_or_default(),
+                                    sort: parse_sorts(self.sort),
+                                    page: self.pagination.page,
+                                    page_size: self.pagination.page_size,
+                                    start: self.pagination.start,
+                                    limit: self.pagination.limit,
+                                    locale: self.locale,
+                                    status: self.status,
+                                    search_query: self.q,
+                                };
+                            }
+                            map.insert(s.to_string(), PopulateFieldOpts::default());
+                        }
+                    }
+                    PopulateSpec::Fields(map)
+                } else {
+                    let mut map = BTreeMap::new();
+                    for (field_name, cfg) in raw_map {
+                        let mut opts = PopulateFieldOpts::default();
+                        if let Some(obj) = cfg.as_object() {
+                            if let Some(f_val) = obj.get("fields") {
+                                if let Some(arr) = f_val.as_array() {
+                                    opts.fields = arr
+                                        .iter()
+                                        .filter_map(|x| x.as_str().map(String::from))
+                                        .collect();
+                                } else if let Some(f_obj) = f_val.as_object() {
+                                    opts.fields = f_obj
+                                        .values()
+                                        .filter_map(|x| x.as_str().map(String::from))
+                                        .collect();
+                                }
+                            }
+                            if obj.contains_key("populate") {
+                                opts.populate_nested = true;
+                            }
+                        } else if cfg.as_bool() == Some(true) || cfg.as_str() == Some("*") {
+                            opts.populate_nested = cfg.as_str() == Some("*");
+                        }
+                        map.insert(field_name, opts);
+                    }
+                    PopulateSpec::Fields(map)
+                }
+            }
+        };
+
+        DocumentQuery {
+            filters: self.filters,
+            populate,
+            fields: self.fields.map(StringOrList::into_vec).unwrap_or_default(),
+            sort: parse_sorts(self.sort),
+            page: self.pagination.page,
+            page_size: self.pagination.page_size,
+            start: self.pagination.start,
+            limit: self.pagination.limit,
+            locale: self.locale,
+            status: self.status,
+            search_query: self.q,
+        }
+    }
+}
+
+fn parse_sorts(raw: Option<StringOrList>) -> Vec<SortSpec> {
+    raw.map(StringOrList::into_vec)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| SortSpec::parse(&s))
+        .collect()
 }
 
 #[cfg(test)]

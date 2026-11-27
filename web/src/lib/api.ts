@@ -173,6 +173,13 @@ export interface FieldValidation {
   targetField?: string;
   multiple?: boolean;
   allowedTypes?: string[];
+  conditions?: {
+    visible?: {
+      field: string;
+      eq?: unknown;
+      ne?: unknown;
+    };
+  };
 }
 
 export interface RelationConfig {
@@ -250,6 +257,28 @@ export interface SchemaInspectionDto {
   columns: PhysicalColumnInfo[];
   migrations: SchemaMigrationRecord[];
 }
+
+export interface ContentVersionDto {
+  id: string;
+  documentId: string;
+  contentTypeUid: string;
+  version: number;
+  locale: string;
+  status: string;
+  data: Record<string, unknown>;
+  createdBy: string | null;
+  createdAt: string;
+}
+
+export type ContentDocument = Record<string, unknown> & {
+  id: number;
+  documentId: string;
+  locale: string;
+  publishedAt: string | null;
+  publicationState?: "draft" | "published" | "modified";
+  createdAt: string;
+  updatedAt: string;
+};
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 
@@ -510,6 +539,150 @@ export const api = {
     (
       await requestJson<ApiResponse<SchemaInspectionDto>>(
         `/admin/content-types/${encodeURIComponent(uid)}/inspection`,
+      )
+    ).data,
+
+  // Public API Role Permissions
+  getPublicPermissions: async () =>
+    (await requestJson<ApiResponse<PermissionRule[]>>("/admin/public-permissions")).data,
+
+  updatePublicPermissions: async (permissions: PermissionRule[]) =>
+    (
+      await requestJson<ApiResponse<PermissionRule[]>>("/admin/public-permissions", {
+        method: "PUT",
+        body: JSON.stringify({ permissions }),
+      })
+    ).data,
+
+  // Admin Content Manager
+  listEntries: async (
+    uid: string,
+    params: {
+      page?: number;
+      pageSize?: number;
+      locale?: string;
+      status?: "draft" | "published";
+      q?: string;
+      sort?: string;
+    } = {},
+  ) => {
+    const qs = new URLSearchParams();
+    if (params.page) qs.set("pagination[page]", String(params.page));
+    if (params.pageSize) qs.set("pagination[pageSize]", String(params.pageSize));
+    if (params.locale) qs.set("locale", params.locale);
+    if (params.status) qs.set("status", params.status);
+    if (params.q) qs.set("_q", params.q);
+    if (params.sort) qs.set("sort", params.sort);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return requestJson<ApiResponse<ContentDocument[]>>(
+      `/admin/content-manager/${encodeURIComponent(uid)}${suffix}`,
+    );
+  },
+
+  getEntry: async (uid: string, documentId: string, locale = "en") =>
+    (
+      await requestJson<ApiResponse<ContentDocument>>(
+        `/admin/content-manager/${encodeURIComponent(uid)}/${encodeURIComponent(documentId)}?locale=${encodeURIComponent(locale)}`,
+      )
+    ).data,
+
+  getSingleEntry: async (uid: string, locale = "en") =>
+    (
+      await requestJson<ApiResponse<ContentDocument | null>>(
+        `/admin/content-manager/${encodeURIComponent(uid)}/single?locale=${encodeURIComponent(locale)}`,
+      )
+    ).data,
+
+  createEntry: async (uid: string, data: Record<string, unknown>, locale = "en") =>
+    (
+      await requestJson<ApiResponse<ContentDocument>>(
+        `/admin/content-manager/${encodeURIComponent(uid)}?locale=${encodeURIComponent(locale)}`,
+        {
+          method: "POST",
+          body: JSON.stringify({ data }),
+        },
+      )
+    ).data,
+
+  updateEntry: async (
+    uid: string,
+    documentId: string,
+    data: Record<string, unknown>,
+    locale = "en",
+  ) =>
+    (
+      await requestJson<ApiResponse<ContentDocument>>(
+        `/admin/content-manager/${encodeURIComponent(uid)}/${encodeURIComponent(documentId)}?locale=${encodeURIComponent(locale)}`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ data }),
+        },
+      )
+    ).data,
+
+  upsertSingleEntry: async (uid: string, data: Record<string, unknown>, locale = "en") =>
+    (
+      await requestJson<ApiResponse<ContentDocument>>(
+        `/admin/content-manager/${encodeURIComponent(uid)}/single?locale=${encodeURIComponent(locale)}`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ data }),
+        },
+      )
+    ).data,
+
+  deleteEntry: async (uid: string, documentId: string) =>
+    requestJson<ApiResponse<{ deleted: string }>>(
+      `/admin/content-manager/${encodeURIComponent(uid)}/${encodeURIComponent(documentId)}`,
+      { method: "DELETE" },
+    ),
+
+  publishEntry: async (uid: string, documentId: string, locale = "en") =>
+    (
+      await requestJson<ApiResponse<ContentDocument>>(
+        `/admin/content-manager/${encodeURIComponent(uid)}/${encodeURIComponent(documentId)}/publish?locale=${encodeURIComponent(locale)}`,
+        { method: "POST" },
+      )
+    ).data,
+
+  unpublishEntry: async (uid: string, documentId: string, locale = "en") =>
+    (
+      await requestJson<ApiResponse<ContentDocument>>(
+        `/admin/content-manager/${encodeURIComponent(uid)}/${encodeURIComponent(documentId)}/unpublish?locale=${encodeURIComponent(locale)}`,
+        { method: "POST" },
+      )
+    ).data,
+
+  bulkPublishEntries: async (uid: string, documentIds: string[], locale = "en") =>
+    requestJson<ApiResponse<{ publishedCount: number }>>(
+      `/admin/content-manager/${encodeURIComponent(uid)}/bulk-publish`,
+      {
+        method: "POST",
+        body: JSON.stringify({ documentIds, locale }),
+      },
+    ),
+
+  bulkDeleteEntries: async (uid: string, documentIds: string[]) =>
+    requestJson<ApiResponse<{ deletedCount: number }>>(
+      `/admin/content-manager/${encodeURIComponent(uid)}/bulk-delete`,
+      {
+        method: "POST",
+        body: JSON.stringify({ documentIds }),
+      },
+    ),
+
+  listEntryVersions: async (uid: string, documentId: string, locale = "en") =>
+    (
+      await requestJson<ApiResponse<ContentVersionDto[]>>(
+        `/admin/content-manager/${encodeURIComponent(uid)}/${encodeURIComponent(documentId)}/versions?locale=${encodeURIComponent(locale)}`,
+      )
+    ).data,
+
+  restoreEntryVersion: async (uid: string, documentId: string, versionId: string) =>
+    (
+      await requestJson<ApiResponse<ContentDocument>>(
+        `/admin/content-manager/${encodeURIComponent(uid)}/${encodeURIComponent(documentId)}/versions/${encodeURIComponent(versionId)}/restore`,
+        { method: "POST" },
       )
     ).data,
 };

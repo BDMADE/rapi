@@ -34,6 +34,34 @@ export function UsersRolesPage() {
     queryKey: ["permission-catalog"],
     queryFn: api.getPermissionCatalog,
   });
+  const schemasQuery = useQuery({
+    queryKey: ["schemas-catalog"],
+    queryFn: api.listSchemas,
+  });
+  const publicPermsQuery = useQuery({
+    queryKey: ["public-permissions"],
+    queryFn: api.getPublicPermissions,
+  });
+
+  const [publicActions, setPublicActions] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    if (publicPermsQuery.data) {
+      setPublicActions(new Set(publicPermsQuery.data.map((r) => r.action)));
+    }
+  }, [publicPermsQuery.data]);
+
+  const savePublicPermsMut = useMutation({
+    mutationFn: () =>
+      api.updatePublicPermissions(
+        Array.from(publicActions).map((action) => ({ action })),
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["public-permissions"] });
+      pushToast({ title: "Public Content API permissions saved", tone: "success" });
+    },
+    onError: (e: Error) =>
+      pushToast({ title: "Save failed", description: e.message, tone: "error" }),
+  });
 
   const [selectedRoleId, setSelectedRoleId] = useState<string>("role_editor");
   const rolePermsQuery = useQuery({
@@ -165,6 +193,7 @@ export function UsersRolesPage() {
         <TabsList>
           <TabsTrigger value="users">Administrators ({usersQuery.data?.length ?? 0})</TabsTrigger>
           <TabsTrigger value="roles">Roles &amp; Permission Matrix</TabsTrigger>
+          <TabsTrigger value="public">Public Content API Access</TabsTrigger>
         </TabsList>
 
         <TabsContent value="users" className="space-y-3">
@@ -483,6 +512,63 @@ export function UsersRolesPage() {
               </CardContent>
             </Card>
           </div>
+        </TabsContent>
+
+        <TabsContent value="public">
+          <Card>
+            <CardHeader>
+              <CardTitle>Unauthenticated Public Role (/api/*)</CardTitle>
+              <Button
+                size="sm"
+                onClick={() => savePublicPermsMut.mutate()}
+                disabled={savePublicPermsMut.isPending}
+              >
+                <Save className="h-3.5 w-3.5" />
+                Save public permissions
+              </Button>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {(schemasQuery.data?.contentTypes ?? []).length === 0 ? (
+                <p className="text-xs text-zinc-500">
+                  Create a content type first to configure Public REST API permissions.
+                </p>
+              ) : (
+                (schemasQuery.data?.contentTypes ?? []).map((ct) => {
+                  const ops = ["find", "findOne", "create", "update", "delete"];
+                  return (
+                    <div
+                      key={ct.uid}
+                      className="flex flex-wrap items-center justify-between gap-3 rounded border border-zinc-200 p-3"
+                    >
+                      <div>
+                        <div className="text-xs font-semibold text-zinc-900">{ct.displayName}</div>
+                        <div className="font-mono text-[11px] text-zinc-500">{ct.uid}</div>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-4 text-xs">
+                        {ops.map((op) => {
+                          const act = `${ct.uid}.${op}`;
+                          return (
+                            <label key={act} className="flex cursor-pointer items-center gap-1.5">
+                              <Checkbox
+                                checked={publicActions.has(act)}
+                                onCheckedChange={(val) => {
+                                  const next = new Set(publicActions);
+                                  if (val) next.add(act);
+                                  else next.delete(act);
+                                  setPublicActions(next);
+                                }}
+                              />
+                              <span className="font-mono">{op}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </CardContent>
+          </Card>
         </TabsContent>
       </Tabs>
     </div>

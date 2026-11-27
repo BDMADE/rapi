@@ -273,7 +273,7 @@ Each phase ends with runnable software + automated tests.
   - ✅ Milestone: `cargo test` passes, `cargo run --bin rapi -- serve` + `npm run build`/`dev` both run cleanly with zero external dependencies (and connect to Redis when configured); `/health` and `/ready` return structured status.
 - [x] **Phase 1 — Auth, RBAC, tokens**
 - [x] **Phase 2 — Schema engine & Content-Type Builder**
-- [ ] **Phase 3 — Content Manager + REST API**
+- [x] **Phase 3 — Content Manager + REST API**
 - [ ] **Phase 4 — Media Library**
 - [ ] **Phase 5 — i18n, preview, governance**
 - [ ] **Phase 6 — GraphQL, integrations, data management**
