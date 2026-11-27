@@ -5,10 +5,17 @@ pub mod id;
 pub mod models;
 pub mod response;
 pub mod runtime;
+pub mod schema;
 
 pub use auth::{
     builtin_permission_catalog, Actor, AdminRoleDto, AdminRoleSummary, AdminUserDto, ApiTokenDto,
     AuthTokenResponse, CreatedTokenDto, PermissionCatalogItem, PermissionRule, TokenType,
+};
+pub use schema::{
+    fts_table_name_for_uid, table_name_for_uid, validate_field_identifier, validate_schema_uid,
+    ComponentConfig, ContentTypeSchema, FieldDefinition, FieldType, FieldValidation,
+    PhysicalColumnInfo, RelationConfig, RelationKind, SchemaInspectionDto, SchemaMigrationRecord,
+    RESERVED_FIELD_NAMES,
 };
 
 pub use config::AppConfig;

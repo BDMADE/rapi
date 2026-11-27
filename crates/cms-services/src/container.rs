@@ -1,10 +1,13 @@
 use crate::auth::AuthService;
+use crate::schema::SchemaService;
 use crate::system::SystemService;
 use cms_core::{
     ApiResult, AppConfig, CacheBackend, InMemoryCacheBackend, LocalPubSubBackend, PubSubBackend,
     QueueBackend,
 };
-use cms_db::{AuthRepository, DbPools, PlatformRepository, RedisRuntime, SqliteQueueBackend};
+use cms_db::{
+    AuthRepository, DbPools, PlatformRepository, RedisRuntime, SchemaEngine, SqliteQueueBackend,
+};
 use cms_plugin_api::PluginRegistry;
 use std::sync::Arc;
 use std::time::Instant;
@@ -20,6 +23,7 @@ pub struct ServiceContainer {
     pub plugins: PluginRegistry,
     pub system: SystemService,
     pub auth: AuthService,
+    pub schema: SchemaService,
     pub started_at: Instant,
 }
 
@@ -64,6 +68,8 @@ impl ServiceContainer {
         );
         let auth_repo = AuthRepository::new(db.clone());
         let auth = AuthService::new(auth_repo, config.clone(), cache.clone(), pubsub.clone());
+        let schema_engine = SchemaEngine::new(db.clone());
+        let schema = SchemaService::new(schema_engine, cache.clone(), pubsub.clone());
 
         Ok(Self {
             config,
@@ -74,6 +80,7 @@ impl ServiceContainer {
             plugins,
             system,
             auth,
+            schema,
             started_at,
         })
     }

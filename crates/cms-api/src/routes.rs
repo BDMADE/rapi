@@ -1,6 +1,7 @@
 use crate::auth::{admin_auth_routes, enforce_permission, RequireAdmin};
 use crate::error::HttpApiError;
 use crate::openapi::ApiDoc;
+use crate::schema::admin_schema_routes;
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{header, HeaderName, HeaderValue, Method, StatusCode, Uri};
 use axum::response::Html;
@@ -42,7 +43,8 @@ pub fn build_router(services: ServiceContainer) -> Router {
         .route("/api", get(api_index_handler))
         .route("/admin/init", get(admin_init_handler))
         .route("/admin/system/overview", get(system_overview_handler))
-        .merge(admin_auth_routes());
+        .merge(admin_auth_routes())
+        .merge(admin_schema_routes());
 
     if enable_docs {
         router = router
@@ -864,5 +866,185 @@ mod tests {
             }
         }
         assert!(hit_429, "Expected per-email rate limit to trigger 429");
+    }
+
+    #[tokio::test]
+    async fn phase2_content_type_builder_lifecycle_and_ddl_inspection() {
+        let app = test_router().await;
+
+        let reg = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/register-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "email": "builder@rapi.dev",
+                            "password": "Password123!",
+                            "firstname": "Builder"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let reg_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(reg.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let jwt = reg_json["data"]["token"].as_str().unwrap().to_string();
+
+        // 1. Create reusable component `shared.seo`
+        let comp_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/content-types")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "uid": "shared.seo",
+                            "kind": "component",
+                            "category": "shared",
+                            "singularName": "seo",
+                            "pluralName": "seos",
+                            "displayName": "SEO Meta",
+                            "fields": [
+                                { "name": "metaTitle", "fieldType": "string", "required": true },
+                                { "name": "metaDescription", "fieldType": "text" }
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(comp_res.status(), StatusCode::OK);
+
+        // 2. Create `api::category.category` collection type
+        let cat_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/content-types")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "uid": "api::category.category",
+                            "kind": "collectionType",
+                            "singularName": "category",
+                            "pluralName": "categories",
+                            "displayName": "Category",
+                            "fields": [
+                                { "name": "name", "fieldType": "string", "required": true, "unique": true }
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cat_res.status(), StatusCode::OK);
+
+        // 3. Create `api::article.article` with scalar, blocks, enum, media, relation, component, and dynamiczone!
+        let art_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/content-types")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "uid": "api::article.article",
+                            "kind": "collectionType",
+                            "singularName": "article",
+                            "pluralName": "articles",
+                            "displayName": "Article",
+                            "draftAndPublish": true,
+                            "i18nEnabled": true,
+                            "fields": [
+                                { "name": "title", "fieldType": "string", "required": true, "localized": true },
+                                { "name": "slug", "fieldType": "uid", "unique": true, "validation": { "targetField": "title" } },
+                                { "name": "body", "fieldType": "blocks", "localized": true },
+                                { "name": "kind_tag", "fieldType": "enumeration", "validation": { "enumValues": ["news", "tutorial"] } },
+                                { "name": "cover", "fieldType": "media" },
+                                {
+                                    "name": "category",
+                                    "fieldType": "relation",
+                                    "relation": {
+                                        "relationType": "manyToOne",
+                                        "targetUid": "api::category.category"
+                                    }
+                                },
+                                {
+                                    "name": "seo",
+                                    "fieldType": "component",
+                                    "component": { "componentUid": "shared.seo", "repeatable": false }
+                                },
+                                {
+                                    "name": "sections",
+                                    "fieldType": "dynamiczone",
+                                    "component": { "components": ["shared.seo"] }
+                                }
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(art_res.status(), StatusCode::OK);
+
+        // 4. Inspect physical SQLite table for `api::article.article`
+        let insp_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/content-types/api::article.article/inspection")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(insp_res.status(), StatusCode::OK);
+        let insp_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(insp_res.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(
+            insp_json["data"]["tableName"],
+            "ct_api_article_article"
+        );
+        let cols = insp_json["data"]["columns"].as_array().unwrap();
+        assert!(cols.iter().any(|c| c["name"] == "title"));
+        assert!(cols.iter().any(|c| c["name"] == "seo"));
+        assert!(cols.iter().any(|c| c["name"] == "sections"));
+        // Relation & Media are resolved via status-isolated join tables, not physical columns
+        assert!(!cols.iter().any(|c| c["name"] == "cover"));
+        assert!(!cols.iter().any(|c| c["name"] == "category"));
+
+        // 5. Deleting `shared.seo` while referenced by `api::article.article` must return 409 Conflict
+        let del_comp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/admin/content-types/shared.seo")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del_comp.status(), StatusCode::CONFLICT);
     }
 }

@@ -4,6 +4,7 @@ import { AppLayout } from "@/app/layout";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ForgotPasswordPage, LoginPage, OnboardingPage } from "@/features/auth/auth-pages";
+import { ContentTypeBuilderPage } from "@/features/content-type-builder/builder-page";
 import { OverviewPage } from "@/features/dashboard/overview-page";
 import { ModulePlaceholderPage } from "@/features/placeholders/workspace-views";
 import { TokensPage } from "@/features/settings/tokens-page";
@@ -45,7 +46,7 @@ export const router = createBrowserRouter([
       },
       {
         path: "content-type-builder",
-        element: <ModulePlaceholderPage moduleKey="content-type-builder" />,
+        element: <ContentTypeBuilderPage />,
       },
       {
         path: "media-library",
