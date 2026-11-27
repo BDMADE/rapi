@@ -1,0 +1,12 @@
+[package]
+name = "cms-worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cms-core.workspace = true
+cms-services.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+serde_json.workspace = true

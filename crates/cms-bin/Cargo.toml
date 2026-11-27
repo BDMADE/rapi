@@ -1,0 +1,24 @@
+[package]
+name = "cms-bin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+default-run = "rapi"
+
+[[bin]]
+name = "rapi"
+path = "src/main.rs"
+
+[dependencies]
+cms-core.workspace = true
+cms-db.workspace = true
+cms-services.workspace = true
+cms-api.workspace = true
+cms-worker.workspace = true
+anyhow.workspace = true
+axum.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true

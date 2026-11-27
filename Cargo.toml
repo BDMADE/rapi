@@ -1,0 +1,48 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/cms-core",
+  "crates/cms-plugin-api",
+  "crates/cms-db",
+  "crates/cms-services",
+  "crates/cms-api",
+  "crates/cms-worker",
+  "crates/cms-bin",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["RAPI Contributors"]
+
+[workspace.dependencies]
+cms-core = { path = "crates/cms-core" }
+cms-plugin-api = { path = "crates/cms-plugin-api" }
+cms-db = { path = "crates/cms-db" }
+cms-services = { path = "crates/cms-services" }
+cms-api = { path = "crates/cms-api" }
+cms-worker = { path = "crates/cms-worker" }
+
+tokio = { version = "1.43", features = ["full"] }
+axum = { version = "0.8", features = ["macros", "multipart"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "fs", "compression-gzip", "request-id"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_qs = "0.13"
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "sqlite", "chrono", "uuid", "json", "migrate"] }
+sea-query = { version = "0.32", features = ["thread-safe"] }
+moka = { version = "0.12", features = ["future"] }
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+thiserror = "2.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.12", features = ["v4", "v7", "serde"] }
+rand = "0.8"
+async-trait = "0.1"
+dotenvy = "0.15"
+clap = { version = "4.5", features = ["derive", "env"] }
+utoipa = { version = "5.3", features = ["axum_extras", "chrono", "uuid"] }

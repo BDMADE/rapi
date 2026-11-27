@@ -1,0 +1,35 @@
+services:
+  rapi:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "1337:1337"
+    environment:
+      RAPI_HOST: 0.0.0.0
+      RAPI_PORT: 1337
+      DATABASE_URL: sqlite:///app/data/rapi.db?mode=rwc
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production-32-bytes-minimum}
+      LOG_FORMAT: json
+    volumes:
+      - rapi_data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  rapi_data:
+  redis_data:
