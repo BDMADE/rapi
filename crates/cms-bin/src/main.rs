@@ -2,7 +2,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use cms_api::build_router;
 use cms_core::AppConfig;
-use cms_db::DbPools;
+use cms_db::{DbPools, PlatformRepository};
 use cms_services::ServiceContainer;
 use cms_worker::WorkerRunner;
 use tokio::net::TcpListener;
@@ -29,6 +29,8 @@ enum Commands {
     Worker,
     /// Apply core SQLite platform migrations and exit
     Migrate,
+    /// Idempotently seed core roles, default locale, and workflow stages
+    Seed,
     /// Print active runtime info and platform database statistics
     Info,
 }
@@ -51,6 +53,20 @@ async fn main() -> anyhow::Result<()> {
                 .await
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
             info!("Core SQLite migrations applied successfully");
+        }
+        Commands::Seed => {
+            let pools = DbPools::connect(&config.database_url)
+                .await
+                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            pools
+                .run_migrations()
+                .await
+                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            let repo = PlatformRepository::new(pools);
+            repo.seed_defaults()
+                .await
+                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            info!("Platform defaults seeded successfully");
         }
         Commands::Info => {
             let services = ServiceContainer::bootstrap(config)

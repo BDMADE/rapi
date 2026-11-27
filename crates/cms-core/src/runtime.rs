@@ -2,7 +2,7 @@ use crate::error::{ApiError, ApiResult};
 use async_trait::async_trait;
 use moka::future::Cache;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -74,10 +74,16 @@ pub trait PubSubBackend: Send + Sync {
     fn subscribe_local(&self) -> broadcast::Receiver<InvalidationEvent>;
 }
 
-/// Zero-config in-memory cache powered by `moka`.
+#[derive(Clone)]
+struct CacheEntry {
+    value: String,
+    expires_at: Option<Instant>,
+}
+
+/// Zero-config in-memory cache powered by `moka` with strict per-entry TTL enforcement.
 #[derive(Clone)]
 pub struct InMemoryCacheBackend {
-    cache: Cache<String, String>,
+    cache: Cache<String, CacheEntry>,
 }
 
 impl InMemoryCacheBackend {
@@ -97,11 +103,29 @@ impl CacheBackend for InMemoryCacheBackend {
     }
 
     async fn get(&self, key: &str) -> ApiResult<Option<String>> {
-        Ok(self.cache.get(key).await)
+        let Some(entry) = self.cache.get(key).await else {
+            return Ok(None);
+        };
+        if let Some(exp) = entry.expires_at {
+            if Instant::now() >= exp {
+                self.cache.invalidate(key).await;
+                return Ok(None);
+            }
+        }
+        Ok(Some(entry.value))
     }
 
-    async fn set(&self, key: &str, value: &str, _ttl: Option<Duration>) -> ApiResult<()> {
-        self.cache.insert(key.to_string(), value.to_string()).await;
+    async fn set(&self, key: &str, value: &str, ttl: Option<Duration>) -> ApiResult<()> {
+        let expires_at = ttl.map(|d| Instant::now() + d);
+        self.cache
+            .insert(
+                key.to_string(),
+                CacheEntry {
+                    value: value.to_string(),
+                    expires_at,
+                },
+            )
+            .await;
         Ok(())
     }
 
@@ -148,5 +172,28 @@ impl PubSubBackend for LocalPubSubBackend {
 
     fn subscribe_local(&self) -> broadcast::Receiver<InvalidationEvent> {
         self.sender.subscribe()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn in_memory_cache_enforces_per_entry_ttl() {
+        let cache = InMemoryCacheBackend::new(100);
+        cache
+            .set("short", "val1", Some(Duration::from_millis(40)))
+            .await
+            .unwrap();
+        cache
+            .set("long", "val2", Some(Duration::from_secs(60)))
+            .await
+            .unwrap();
+
+        assert_eq!(cache.get("short").await.unwrap().as_deref(), Some("val1"));
+        tokio::time::sleep(Duration::from_millis(70)).await;
+        assert_eq!(cache.get("short").await.unwrap(), None);
+        assert_eq!(cache.get("long").await.unwrap().as_deref(), Some("val2"));
     }
 }

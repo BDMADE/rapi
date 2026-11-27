@@ -56,6 +56,45 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
+CREATE TABLE IF NOT EXISTS admin_tokens (
+    id TEXT PRIMARY KEY NOT NULL,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT NOT NULL DEFAULT '',
+    token_type TEXT NOT NULL CHECK (token_type IN ('full-access', 'read-only', 'custom')),
+    access_key_hash TEXT NOT NULL UNIQUE,
+    admin_user_id TEXT REFERENCES admin_users(id) ON DELETE CASCADE,
+    lifespan_ms INTEGER,
+    expires_at TEXT,
+    last_used_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS user_roles (
+    id TEXT PRIMARY KEY NOT NULL,
+    role_type TEXT NOT NULL UNIQUE, -- e.g. 'authenticated', 'public'
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS end_users (
+    id TEXT PRIMARY KEY NOT NULL,
+    document_id TEXT NOT NULL UNIQUE,
+    username TEXT NOT NULL UNIQUE,
+    email TEXT NOT NULL UNIQUE,
+    provider TEXT NOT NULL DEFAULT 'local',
+    password_hash TEXT NOT NULL,
+    reset_password_token TEXT,
+    confirmation_token TEXT,
+    confirmed INTEGER NOT NULL DEFAULT 1,
+    blocked INTEGER NOT NULL DEFAULT 0,
+    role_id TEXT NOT NULL REFERENCES user_roles(id),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY NOT NULL,
     user_type TEXT NOT NULL CHECK (user_type IN ('admin', 'end_user')),
@@ -347,3 +386,13 @@ INSERT OR IGNORE INTO admin_roles (id, code, name, description) VALUES
     ('role_super_admin', 'strapi-super-admin', 'Super Admin', 'Super Admins can access and manage all features and settings.'),
     ('role_editor', 'strapi-editor', 'Editor', 'Editors can manage and publish contents including those of other users.'),
     ('role_author', 'strapi-author', 'Author', 'Authors can manage the content they have created.');
+
+INSERT OR IGNORE INTO user_roles (id, role_type, name, description) VALUES
+    ('urole_authenticated', 'authenticated', 'Authenticated', 'Default role given to authenticated end users.'),
+    ('urole_public', 'public', 'Public', 'Default role given to unauthenticated requests.');
+
+INSERT OR IGNORE INTO workflow_stages (id, name, color, position) VALUES
+    ('stage_todo', 'To do', '#71717a', 0),
+    ('stage_in_progress', 'In progress', '#4f46e5', 1),
+    ('stage_ready_review', 'Ready to review', '#d97706', 2),
+    ('stage_reviewed', 'Reviewed', '#059669', 3);

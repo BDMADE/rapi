@@ -3,6 +3,7 @@ use cms_core::{
     ApiError, ApiResult, CacheBackend, InvalidationEvent, JobMessage, PubSubBackend, QueueBackend,
     RuntimeBackendKind,
 };
+use futures_util::StreamExt;
 use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
 use std::time::Duration;
@@ -28,7 +29,7 @@ impl RedisRuntime {
         let (local_bus, _) = broadcast::channel(256);
         let bus_clone = local_bus.clone();
 
-        // Spawn subscriber keeping Redis invalidation channel subscribed
+        // Spawn subscriber forwarding cross-process Redis invalidation events to in-process listeners
         tokio::spawn(async move {
             match client.get_async_pubsub().await {
                 Ok(mut pubsub) => {
@@ -36,10 +37,13 @@ impl RedisRuntime {
                         warn!("Failed to subscribe to Redis invalidation channel: {e}");
                         return;
                     }
-                    let _keepalive = pubsub;
-                    let _ = &bus_clone;
-                    loop {
-                        tokio::time::sleep(Duration::from_secs(3600)).await;
+                    let mut stream = pubsub.on_message();
+                    while let Some(msg) = stream.next().await {
+                        if let Ok(payload) = msg.get_payload::<String>() {
+                            if let Ok(event) = serde_json::from_str::<InvalidationEvent>(&payload) {
+                                let _ = bus_clone.send(event);
+                            }
+                        }
                     }
                 }
                 Err(e) => {

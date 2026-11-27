@@ -82,11 +82,70 @@ export function LoginPage() {
         </form>
 
         <div className="mt-5 flex items-center justify-between border-t border-zinc-200 pt-4 text-xs text-zinc-500">
-          <Link to="/" className="hover:text-zinc-900">
-            Return to dashboard
+          <Link to="/forgot-password" className="hover:text-zinc-900">
+            Forgot password?
           </Link>
           <Link to="/onboarding" className="font-medium text-indigo-700 hover:underline">
             First-time setup
+          </Link>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const forgotSchema = z.object({
+  email: z.string().email("Enter a valid administrator email"),
+});
+
+export function ForgotPasswordPage() {
+  const [sent, setSent] = useState<string | null>(null);
+  const {
+    register,
+    handleSubmit,
+    formState: { errors },
+  } = useForm<{ email: string }>({
+    resolver: zodResolver(forgotSchema),
+  });
+
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-zinc-50 p-4">
+      <div className="w-full max-w-sm rounded-md border border-zinc-200 bg-white p-6">
+        <h1 className="text-base font-semibold text-zinc-900">Reset password</h1>
+        <p className="mt-1 text-xs text-zinc-600">
+          Enter your email to receive a signed one-time recovery link via SMTP.
+        </p>
+
+        {sent && (
+          <div className="mt-4 rounded border border-emerald-200 bg-emerald-50 p-2.5 text-xs text-emerald-900">
+            {sent}
+          </div>
+        )}
+
+        <form
+          onSubmit={handleSubmit((d) =>
+            setSent(`If an account exists for ${d.email}, a reset token will be dispatched.`),
+          )}
+          className="mt-4 space-y-3.5"
+          noValidate
+        >
+          <div>
+            <label htmlFor="fp-email" className="mb-1 block text-xs font-medium text-zinc-700">
+              Email address
+            </label>
+            <Input id="fp-email" type="email" placeholder="admin@example.com" {...register("email")} />
+            {errors.email && (
+              <p className="mt-1 text-[11px] text-rose-600">{errors.email.message}</p>
+            )}
+          </div>
+          <Button type="submit" className="w-full">
+            Send recovery link
+          </Button>
+        </form>
+
+        <div className="mt-4 text-center text-xs text-zinc-500">
+          <Link to="/login" className="hover:text-zinc-900">
+            Back to sign in
           </Link>
         </div>
       </div>
