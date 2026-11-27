@@ -459,6 +459,7 @@ dependencies = [
  "hex",
  "jsonwebtoken",
  "rand",
+ "regex",
  "serde",
  "serde_json",
  "sha2",

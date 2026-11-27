@@ -1,4 +1,5 @@
 use crate::auth::{admin_auth_routes, enforce_permission, RequireAdmin};
+use crate::content::content_api_routes;
 use crate::error::HttpApiError;
 use crate::openapi::ApiDoc;
 use crate::schema::admin_schema_routes;
@@ -44,7 +45,8 @@ pub fn build_router(services: ServiceContainer) -> Router {
         .route("/admin/init", get(admin_init_handler))
         .route("/admin/system/overview", get(system_overview_handler))
         .merge(admin_auth_routes())
-        .merge(admin_schema_routes());
+        .merge(admin_schema_routes())
+        .merge(content_api_routes());
 
     if enable_docs {
         router = router
@@ -1286,5 +1288,294 @@ mod tests {
         let insp_json: serde_json::Value =
             serde_json::from_slice(&to_bytes(insp.into_body(), usize::MAX).await.unwrap()).unwrap();
         assert_eq!(insp_json["data"]["migrations"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn phase3_author_publish_relations_filters_fts_and_versions_flow() {
+        let app = test_router().await;
+
+        // 1. Register Super Admin
+        let reg = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/register-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "email": "editor@rapi.dev",
+                            "password": "Password123!",
+                            "firstname": "Editor"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let reg_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(reg.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let jwt = reg_json["data"]["token"].as_str().unwrap().to_string();
+
+        // 2. Define Component `shared.seo`, Collection `api::tag.tag` (draftAndPublish=false), and Collection `api::article.article` (draftAndPublish=true)
+        for schema in [
+            serde_json::json!({
+                "uid": "shared.seo",
+                "kind": "component",
+                "category": "shared",
+                "singularName": "seo",
+                "pluralName": "seos",
+                "displayName": "SEO",
+                "fields": [{ "name": "metaTitle", "fieldType": "string", "required": true }]
+            }),
+            serde_json::json!({
+                "uid": "api::tag.tag",
+                "kind": "collectionType",
+                "singularName": "tag",
+                "pluralName": "tags",
+                "displayName": "Tag",
+                "draftAndPublish": false,
+                "fields": [{ "name": "name", "fieldType": "string", "required": true }]
+            }),
+            serde_json::json!({
+                "uid": "api::article.article",
+                "kind": "collectionType",
+                "singularName": "article",
+                "pluralName": "articles",
+                "displayName": "Article",
+                "draftAndPublish": true,
+                "fields": [
+                    { "name": "title", "fieldType": "string", "required": true },
+                    { "name": "slug", "fieldType": "uid", "unique": true, "validation": { "targetField": "title" } },
+                    { "name": "views", "fieldType": "integer" },
+                    { "name": "secretNote", "fieldType": "string", "private": true },
+                    { "name": "body", "fieldType": "blocks" },
+                    {
+                        "name": "tags",
+                        "fieldType": "relation",
+                        "relation": { "relationType": "manyToMany", "targetUid": "api::tag.tag" }
+                    },
+                    {
+                        "name": "seo",
+                        "fieldType": "component",
+                        "component": { "componentUid": "shared.seo", "repeatable": false }
+                    },
+                    {
+                        "name": "blocksZone",
+                        "fieldType": "dynamiczone",
+                        "component": { "components": ["shared.seo"] }
+                    }
+                ]
+            }),
+        ] {
+            let res = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/admin/content-types")
+                        .header("authorization", format!("Bearer {jwt}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(schema.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+        }
+
+        // Grant Public `find` & `findOne` on `api::article.article`
+        let pub_grant = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/public-permissions")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "permissions": [
+                                { "action": "api::article.article.find", "targetUid": "api::article.article" },
+                                { "action": "api::article.article.findOne", "targetUid": "api::article.article" }
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(pub_grant.status(), StatusCode::OK);
+
+        // 3. Create two Tags via REST Content API
+        let mut tag_ids = Vec::new();
+        for tag_name in ["Rust", "Axum"] {
+            let t_res = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/tags")
+                        .header("authorization", format!("Bearer {jwt}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({ "data": { "name": tag_name } }).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(t_res.status(), StatusCode::OK);
+            let t_json: serde_json::Value =
+                serde_json::from_slice(&to_bytes(t_res.into_body(), usize::MAX).await.unwrap())
+                    .unwrap();
+            tag_ids.push(t_json["data"]["documentId"].as_str().unwrap().to_string());
+        }
+
+        // 4. Author a Draft Article via Admin Content Manager (auto-generates UID slug, links tags, validates component & dynamic zone)
+        let draft_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/content-manager/api::article.article")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "data": {
+                                "title": "Building Strapi v5 in Rust",
+                                "views": 120,
+                                "secretNote": "Internal editorial note",
+                                "body": [{ "type": "paragraph", "children": [{ "type": "text", "text": "Zero redeploy dynamic SQLite engine." }] }],
+                                "tags": { "connect": [{ "documentId": tag_ids[0] }, { "documentId": tag_ids[1] }] },
+                                "seo": { "metaTitle": "Rust CMS SEO" },
+                                "blocksZone": [{ "__component": "shared.seo", "metaTitle": "Zone Block" }]
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(draft_res.status(), StatusCode::OK);
+        let draft_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(draft_res.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let art_doc_id = draft_json["data"]["documentId"].as_str().unwrap().to_string();
+        assert_eq!(draft_json["data"]["slug"], "building-strapi-v5-in-rust");
+        assert!(draft_json["data"]["publishedAt"].is_null());
+
+        // 5. Public REST GET /api/articles returns 0 rows before publish, and blocks ?status=draft with 403
+        let pre_pub = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/articles")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let pre_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(pre_pub.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(pre_json["data"].as_array().unwrap().len(), 0);
+
+        let pub_draft_attempt = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/articles?status=draft")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(pub_draft_attempt.status(), StatusCode::FORBIDDEN);
+
+        // 6. Publish the Article!
+        let publish_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/admin/content-manager/api::article.article/{art_doc_id}/publish"
+                    ))
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(publish_res.status(), StatusCode::OK);
+
+        // 7. Edit the Draft title ("V2 Draft") AND verify live Published REST response STILL serves V1 ("Building Strapi v5 in Rust")!
+        let edit_draft = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!(
+                        "/admin/content-manager/api::article.article/{art_doc_id}"
+                    ))
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "data": { "title": "V2 Draft Only" } }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(edit_draft.status(), StatusCode::OK);
+
+        // Query REST API with filters, populate=*, and FTS5 `_q=redeploy`!
+        let live_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/articles?filters[views][$gte]=100&populate=*&_q=redeploy")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(live_res.status(), StatusCode::OK);
+        let live_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(live_res.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let rows = live_json["data"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["documentId"], art_doc_id);
+        assert_eq!(rows[0]["title"], "Building Strapi v5 in Rust");
+        assert_eq!(rows[0]["tags"].as_array().unwrap().len(), 2);
+        // `private: true` field `secretNote` MUST be stripped from Content API!
+        assert!(rows[0].get("secretNote").is_none());
+
+        // 8. Verify Version History & Restore
+        let ver_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/admin/content-manager/api::article.article/{art_doc_id}/versions"
+                    ))
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ver_res.status(), StatusCode::OK);
+        let ver_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(ver_res.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let versions = ver_json["data"].as_array().unwrap();
+        assert!(versions.len() >= 3); // initial draft + published + v2 draft
     }
 }
