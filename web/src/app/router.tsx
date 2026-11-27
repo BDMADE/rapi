@@ -6,6 +6,8 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { ForgotPasswordPage, LoginPage, OnboardingPage } from "@/features/auth/auth-pages";
 import { OverviewPage } from "@/features/dashboard/overview-page";
 import { ModulePlaceholderPage } from "@/features/placeholders/workspace-views";
+import { TokensPage } from "@/features/settings/tokens-page";
+import { UsersRolesPage } from "@/features/users-roles/users-roles-page";
 
 export const router = createBrowserRouter([
   {
@@ -51,23 +53,31 @@ export const router = createBrowserRouter([
       },
       {
         path: "users",
-        element: <ModulePlaceholderPage moduleKey="users" />,
+        element: <UsersRolesPage />,
       },
       {
         path: "roles",
-        element: <ModulePlaceholderPage moduleKey="users" />,
+        element: <UsersRolesPage />,
       },
       {
         path: "admin/users",
-        element: <ModulePlaceholderPage moduleKey="users" />,
+        element: <UsersRolesPage />,
       },
       {
         path: "admin/roles",
-        element: <ModulePlaceholderPage moduleKey="users" />,
+        element: <UsersRolesPage />,
       },
       {
         path: "account",
-        element: <ModulePlaceholderPage moduleKey="users" />,
+        element: <UsersRolesPage />,
+      },
+      {
+        path: "settings/api-tokens",
+        element: <TokensPage defaultKind="api" />,
+      },
+      {
+        path: "settings/admin-tokens",
+        element: <TokensPage defaultKind="admin" />,
       },
       {
         path: "settings/:section",

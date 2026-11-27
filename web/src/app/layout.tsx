@@ -8,7 +8,7 @@ import {
   Globe,
   KeyRound,
   LayoutDashboard,
-  LogIn,
+  LogOut,
   PanelLeftClose,
   PanelLeftOpen,
   Search,
@@ -16,11 +16,11 @@ import {
   ShieldCheck,
   Webhook,
 } from "lucide-react";
-import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
+import { Link, Navigate, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useUiStore } from "@/app/store";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { CommandDialog } from "@/components/ui/command-dialog";
+import { useAuthStore } from "@/features/auth/auth-store";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -54,7 +54,9 @@ const NAV_GROUPS = [
 export function AppLayout() {
   const { sidebarCollapsed, toggleSidebar, activeLocale, setActiveLocale, setCommandOpen } =
     useUiStore();
+  const { token, refreshToken, user, clearSession } = useAuthStore();
   const location = useLocation();
+  const navigate = useNavigate();
 
   const readinessQuery = useQuery({
     queryKey: ["readiness"],
@@ -68,6 +70,26 @@ export function AppLayout() {
     queryFn: api.getAdminInit,
     retry: 1,
   });
+
+  if (initQuery.isSuccess && !initQuery.data.hasAdmin) {
+    return <Navigate to="/onboarding" replace />;
+  }
+
+  if (!token) {
+    return <Navigate to="/login" replace />;
+  }
+
+  const handleLogout = async () => {
+    if (refreshToken) {
+      try {
+        await api.logout(refreshToken);
+      } catch {
+        // ignore network errors on logout
+      }
+    }
+    clearSession();
+    navigate("/login", { replace: true });
+  };
 
   const isOnline = readinessQuery.isSuccess && readinessQuery.data.status === "ready";
 
@@ -146,16 +168,25 @@ export function AppLayout() {
         </nav>
 
         <div className="border-t border-zinc-200 p-2">
-          <Link
-            to="/login"
+          {!sidebarCollapsed && user && (
+            <div className="mb-1.5 px-2">
+              <div className="truncate text-xs font-medium text-zinc-900">
+                {user.firstname} {user.lastname}
+              </div>
+              <div className="truncate font-mono text-[10px] text-zinc-500">{user.email}</div>
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={handleLogout}
             className={cn(
-              "flex items-center gap-2 rounded-md px-2 py-1.5 text-xs text-zinc-600 hover:bg-zinc-200/60 hover:text-zinc-900",
+              "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-xs text-zinc-600 hover:bg-zinc-200/60 hover:text-zinc-900 cursor-pointer",
               sidebarCollapsed && "justify-center px-0",
             )}
           >
-            <LogIn className="h-4 w-4 shrink-0 text-zinc-500" />
-            {!sidebarCollapsed && <span className="truncate">Sign in / Switch user</span>}
-          </Link>
+            <LogOut className="h-4 w-4 shrink-0 text-zinc-500" />
+            {!sidebarCollapsed && <span className="truncate">Sign out</span>}
+          </button>
         </div>
       </aside>
 
@@ -232,21 +263,6 @@ export function AppLayout() {
             </Badge>
           </div>
         </header>
-
-        {/* First-admin setup banner when database has zero admin users */}
-        {initQuery.data && !initQuery.data.hasAdmin && (
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-indigo-200 bg-indigo-50/70 px-5 py-2 text-xs text-indigo-950">
-            <div>
-              <span className="font-medium">No administrator account configured yet.</span>{" "}
-              <span className="text-indigo-900/80">
-                Complete initial Super Admin setup to lock down admin APIs in Phase 1.
-              </span>
-            </div>
-            <Button size="sm" asChild>
-              <Link to="/onboarding">Create administrator</Link>
-            </Button>
-          </div>
-        )}
 
         <main className="flex-1 p-6">
           <div className="mx-auto max-w-6xl">

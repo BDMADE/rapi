@@ -271,7 +271,7 @@ Each phase ends with runnable software + automated tests.
   - `docker-compose.yml` (app + optional Redis), `.env.example`, `README.md`.
   - Vite + React + TypeScript strict app, Tailwind CSS + Radix UI primitives, app shell (sidebar, topbar, command palette trigger), overview dashboard wired to live backend health/status API, login/onboarding skeleton.
   - ✅ Milestone: `cargo test` passes, `cargo run --bin rapi -- serve` + `npm run build`/`dev` both run cleanly with zero external dependencies (and connect to Redis when configured); `/health` and `/ready` return structured status.
-- [ ] **Phase 1 — Auth, RBAC, tokens**
+- [x] **Phase 1 — Auth, RBAC, tokens**
 - [ ] **Phase 2 — Schema engine & Content-Type Builder**
 - [ ] **Phase 3 — Content Manager + REST API**
 - [ ] **Phase 4 — Media Library**

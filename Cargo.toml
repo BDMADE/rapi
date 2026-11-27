@@ -44,6 +44,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"]
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.12", features = ["v4", "v7", "serde"] }
 rand = "0.8"
+argon2 = "0.5"
+jsonwebtoken = "9.3"
+sha2 = "0.10"
+hex = "0.4"
 async-trait = "0.1"
 dotenvy = "0.15"
 clap = { version = "4.5", features = ["derive", "env"] }
