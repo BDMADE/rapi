@@ -35,6 +35,8 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "sqlite", "
 sea-query = { version = "0.32", features = ["thread-safe"] }
 moka = { version = "0.12", features = ["future"] }
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+futures-util = "0.3"
+toml = "0.8"
 thiserror = "2.0"
 anyhow = "1.0"
 tracing = "0.1"

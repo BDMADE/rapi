@@ -1,7 +1,8 @@
 use crate::error::HttpApiError;
 use crate::openapi::ApiDoc;
 use axum::extract::State;
-use axum::http::{HeaderValue, Method, Uri};
+use axum::http::{HeaderName, HeaderValue, Method, Uri};
+use axum::response::Html;
 use axum::routing::get;
 use axum::{Json, Router};
 use cms_core::{ApiError, ApiResponse};
@@ -11,6 +12,7 @@ use cms_services::{
 use serde::Serialize;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
 use utoipa::OpenApi;
 
@@ -25,15 +27,19 @@ pub struct ApiIndexDto {
 
 pub fn build_router(services: ServiceContainer) -> Router {
     let cors = build_cors_layer(&services.config.cors_origins);
+    let x_request_id = HeaderName::from_static("x-request-id");
 
     Router::new()
         .route("/health", get(health_handler))
         .route("/ready", get(ready_handler))
+        .route("/docs", get(swagger_ui_handler))
         .route("/openapi.json", get(openapi_handler))
         .route("/api", get(api_index_handler))
         .route("/admin/init", get(admin_init_handler))
         .route("/admin/system/overview", get(system_overview_handler))
         .fallback(not_found_handler)
+        .layer(PropagateRequestIdLayer::new(x_request_id.clone()))
+        .layer(SetRequestIdLayer::new(x_request_id, MakeRequestUuid))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
         .layer(cors)
@@ -126,6 +132,32 @@ async fn openapi_handler() -> Json<utoipa::openapi::OpenApi> {
     Json(ApiDoc::openapi())
 }
 
+async fn swagger_ui_handler() -> Html<&'static str> {
+    Html(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RAPI — OpenAPI Documentation</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css" />
+</head>
+<body style="margin:0;background:#fafafa">
+  <div id="swagger-ui"></div>
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script>
+    window.ui = SwaggerUIBundle({
+      url: '/openapi.json',
+      dom_id: '#swagger-ui',
+      deepLinking: true,
+      persistAuthorization: true
+    });
+  </script>
+</body>
+</html>"#,
+    )
+}
+
 async fn not_found_handler(uri: Uri) -> HttpApiError {
     HttpApiError(ApiError::NotFound(format!(
         "Route '{}' was not found",
@@ -159,6 +191,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
+        assert!(res.headers().contains_key("x-request-id"));
+
+        let docs_res = app
+            .clone()
+            .oneshot(Request::builder().uri("/docs").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(docs_res.status(), StatusCode::OK);
 
         let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();

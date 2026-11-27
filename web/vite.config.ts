@@ -19,6 +19,7 @@ export default defineConfig({
       "/admin": backendTarget,
       "/health": backendTarget,
       "/ready": backendTarget,
+      "/docs": backendTarget,
       "/openapi.json": backendTarget,
       "/graphql": backendTarget,
     },
