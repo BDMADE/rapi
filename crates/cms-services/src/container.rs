@@ -23,6 +23,7 @@ pub struct ServiceContainer {
 
 impl ServiceContainer {
     pub async fn bootstrap(config: AppConfig) -> ApiResult<Self> {
+        config.validate()?;
         let db = DbPools::connect(&config.database_url).await?;
         db.run_migrations().await?;
 
