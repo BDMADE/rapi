@@ -111,6 +111,15 @@ export function ContentTypeBuilderPage() {
   const [selectedUid, setSelectedUid] = useState<string | null>(null);
   const [draft, setDraft] = useState<ContentTypeSchema | null>(null);
   const [dirty, setDirty] = useState(false);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+
+  const selectSchemaSafely = (uid: string) => {
+    if (uid === selectedUid) return;
+    if (dirty && !window.confirm("Discard unsaved field/schema changes?")) {
+      return;
+    }
+    setSelectedUid(uid);
+  };
 
   // Select first available schema when catalog loads
   useEffect(() => {
@@ -286,8 +295,28 @@ export function ContentTypeBuilderPage() {
 
   const commitFieldModal = () => {
     if (!draft) return;
+    const trimmedName = fName.trim();
+    if (!/^[a-zA-Z][a-zA-Z0-9_]{0,63}$/.test(trimmedName)) {
+      pushToast({
+        title: "Invalid field name",
+        description: "Use 1–64 ASCII letters, digits, or underscores starting with a letter.",
+        tone: "error",
+      });
+      return;
+    }
+    const isDuplicate = draft.fields.some(
+      (f, idx) => idx !== editingIndex && f.name.toLowerCase() === trimmedName.toLowerCase(),
+    );
+    if (isDuplicate) {
+      pushToast({
+        title: `Field "${trimmedName}" already exists`,
+        description: "Field names must be unique within a schema.",
+        tone: "error",
+      });
+      return;
+    }
     const built: FieldDefinition = {
-      name: fName.trim(),
+      name: trimmedName,
       fieldType: fType,
       required: fRequired,
       unique: fUnique,
@@ -753,7 +782,7 @@ export function ContentTypeBuilderPage() {
                   <button
                     key={ct.uid}
                     type="button"
-                    onClick={() => setSelectedUid(ct.uid)}
+                    onClick={() => selectSchemaSafely(ct.uid)}
                     className={`flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs cursor-pointer ${
                       selectedUid === ct.uid
                         ? "bg-indigo-50 font-medium text-indigo-900"
@@ -788,7 +817,7 @@ export function ContentTypeBuilderPage() {
                   <button
                     key={st.uid}
                     type="button"
-                    onClick={() => setSelectedUid(st.uid)}
+                    onClick={() => selectSchemaSafely(st.uid)}
                     className={`flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs cursor-pointer ${
                       selectedUid === st.uid
                         ? "bg-indigo-50 font-medium text-indigo-900"
@@ -823,7 +852,7 @@ export function ContentTypeBuilderPage() {
                   <button
                     key={c.uid}
                     type="button"
-                    onClick={() => setSelectedUid(c.uid)}
+                    onClick={() => selectSchemaSafely(c.uid)}
                     className={`flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs cursor-pointer ${
                       selectedUid === c.uid
                         ? "bg-indigo-50 font-medium text-indigo-900"
@@ -880,11 +909,42 @@ export function ContentTypeBuilderPage() {
                   <Button
                     size="sm"
                     variant="ghost"
-                    onClick={() => deleteSchemaMut.mutate(draft.uid)}
+                    onClick={() => setDeleteConfirmOpen(true)}
                     disabled={deleteSchemaMut.isPending}
                   >
                     <Trash2 className="h-3.5 w-3.5 text-zinc-400 hover:text-rose-600" />
                   </Button>
+                  <Dialog open={deleteConfirmOpen} onOpenChange={setDeleteConfirmOpen}>
+                    <DialogContent
+                      title={`Delete "${draft.displayName}"?`}
+                      description={
+                        draft.kind === "component"
+                          ? `Removes component ${draft.uid} if no content type references it.`
+                          : `Permanently drops SQLite table and all stored documents for ${draft.uid}.`
+                      }
+                    >
+                      <div className="flex justify-end gap-2 pt-2">
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          onClick={() => setDeleteConfirmOpen(false)}
+                        >
+                          Cancel
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="danger"
+                          disabled={deleteSchemaMut.isPending}
+                          onClick={() => {
+                            deleteSchemaMut.mutate(draft.uid);
+                            setDeleteConfirmOpen(false);
+                          }}
+                        >
+                          Delete permanently
+                        </Button>
+                      </div>
+                    </DialogContent>
+                  </Dialog>
                 </div>
               </CardHeader>
 

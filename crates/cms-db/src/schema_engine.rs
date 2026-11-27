@@ -196,6 +196,7 @@ impl SchemaEngine {
 
         if schema.kind != ContentKind::Component {
             evolve_physical_table(&mut tx, &old_schema, schema).await?;
+            cleanup_removed_virtual_fields(&mut tx, &old_schema, schema).await?;
         }
 
         tx.commit()
@@ -229,7 +230,7 @@ impl SchemaEngine {
             let drop_fts = format!("DROP TABLE IF EXISTS \"{fts_name}\"");
             execute_and_log_ddl(&mut tx, uid, "drop_table", &[drop_table, drop_fts]).await?;
 
-            // Clean up status-isolated relations referencing this content type
+            // Clean up status-isolated relations, media links, and version snapshots for this type
             sqlx::query(
                 "DELETE FROM content_relations WHERE from_content_type_uid = ? OR to_content_type_uid = ?",
             )
@@ -238,6 +239,20 @@ impl SchemaEngine {
             .execute(&mut *tx)
             .await
             .map_err(|e| ApiError::Internal(format!("cleanup content_relations failed: {e}")))?;
+
+            sqlx::query(
+                "DELETE FROM upload_file_relations WHERE from_document_id IN (SELECT document_id FROM documents WHERE content_type_uid = ?)",
+            )
+            .bind(uid)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| ApiError::Internal(format!("cleanup upload_file_relations failed: {e}")))?;
+
+            sqlx::query("DELETE FROM content_versions WHERE content_type_uid = ?")
+                .bind(uid)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| ApiError::Internal(format!("cleanup content_versions failed: {e}")))?;
         }
 
         sqlx::query("DELETE FROM content_types WHERE uid = ?")
@@ -632,17 +647,28 @@ async fn evolve_physical_table(
 
     if !needs_rebuild {
         let mut stmts = Vec::new();
+        let mut added_unique = false;
+
         for nf in &new_phys {
-            if !old_phys.iter().any(|of| of.name == nf.name) {
+            let old_match = old_phys.iter().find(|of| of.name == nf.name);
+            if old_match.is_none() {
                 let alter = Table::alter()
                     .table(Alias::new(&table_name))
                     .add_column(build_column_def(nf))
                     .to_string(SqliteQueryBuilder);
                 stmts.push(alter);
+                if nf.unique {
+                    added_unique = true;
+                }
+            } else if let Some(of) = old_match {
+                if !of.unique && nf.unique {
+                    added_unique = true;
+                }
             }
         }
-        stmts.extend(build_index_statements(&table_name, &new_schema.fields));
-        if !stmts.is_empty() {
+
+        if !stmts.is_empty() || added_unique {
+            stmts.extend(build_index_statements(&table_name, &new_schema.fields));
             execute_and_log_ddl(tx, &new_schema.uid, "alter_add_columns", &stmts).await?;
         }
         return Ok(());
@@ -740,6 +766,42 @@ async fn evolve_physical_table(
     execute_and_log_ddl(tx, &new_schema.uid, "rebuild_table", &rebuild_stmts).await
 }
 
+async fn cleanup_removed_virtual_fields(
+    tx: &mut Transaction<'_, Sqlite>,
+    old_schema: &ContentTypeSchema,
+    new_schema: &ContentTypeSchema,
+) -> ApiResult<()> {
+    for old_f in &old_schema.fields {
+        let still_same_virtual = new_schema
+            .fields
+            .iter()
+            .any(|nf| nf.name == old_f.name && nf.field_type == old_f.field_type);
+        if still_same_virtual {
+            continue;
+        }
+        if old_f.field_type == FieldType::Relation {
+            sqlx::query(
+                "DELETE FROM content_relations WHERE from_content_type_uid = ? AND field_name = ?",
+            )
+            .bind(&new_schema.uid)
+            .bind(&old_f.name)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| ApiError::Internal(format!("cleanup removed relation field failed: {e}")))?;
+        } else if old_f.field_type == FieldType::Media {
+            sqlx::query(
+                "DELETE FROM upload_file_relations WHERE field_name = ? AND from_document_id IN (SELECT document_id FROM documents WHERE content_type_uid = ?)",
+            )
+            .bind(&old_f.name)
+            .bind(&new_schema.uid)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| ApiError::Internal(format!("cleanup removed media field failed: {e}")))?;
+        }
+    }
+    Ok(())
+}
+
 async fn execute_and_log_ddl(
     tx: &mut Transaction<'_, Sqlite>,
     uid: &str,
@@ -747,10 +809,18 @@ async fn execute_and_log_ddl(
     statements: &[String],
 ) -> ApiResult<()> {
     for stmt in statements {
-        sqlx::query(stmt)
-            .execute(&mut **tx)
-            .await
-            .map_err(|e| ApiError::Internal(format!("DDL execution failed ({stmt}): {e}")))?;
+        if let Err(e) = sqlx::query(stmt).execute(&mut **tx).await {
+            let msg = e.to_string();
+            if msg.contains("UNIQUE constraint failed") {
+                return Err(ApiError::Conflict(
+                    "Cannot apply unique constraint: duplicate values already exist for this field"
+                        .to_string(),
+                ));
+            }
+            return Err(ApiError::Internal(format!(
+                "DDL execution failed ({stmt}): {e}"
+            )));
+        }
     }
 
     let combined = statements.join(";\n");

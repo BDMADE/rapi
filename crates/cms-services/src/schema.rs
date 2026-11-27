@@ -10,6 +10,10 @@ use std::time::Duration;
 
 const SCHEMA_CACHE_ALL_KEY: &str = "rapi:schema:__all__";
 const SCHEMA_CACHE_TTL_SECS: u64 = 300;
+const RESERVED_API_SLUGS: &[&str] = &[
+    "auth", "upload", "users", "files", "folders", "graphql", "admin", "health", "ready", "docs",
+    "openapi",
+];
 
 #[derive(Clone)]
 pub struct SchemaService {
@@ -80,6 +84,7 @@ impl SchemaService {
         let existing_all = self.engine.list_schemas().await?;
         check_api_slug_collisions(&schema, &existing_all, true)?;
         validate_cross_schema_references(&schema, &existing_all)?;
+        detect_component_cycle(&schema, &existing_all)?;
 
         let created = self.engine.create_schema(&schema).await?;
         self.invalidate_schema(&created.uid).await;
@@ -96,6 +101,7 @@ impl SchemaService {
         let existing_all = self.engine.list_schemas().await?;
         check_api_slug_collisions(&schema, &existing_all, false)?;
         validate_cross_schema_references(&schema, &existing_all)?;
+        detect_component_cycle(&schema, &existing_all)?;
 
         let updated = self.engine.update_schema(&schema).await?;
         self.invalidate_schema(uid).await;
@@ -194,6 +200,21 @@ fn normalize_and_validate_schema(schema: &mut ContentTypeSchema) -> ApiResult<()
             .unwrap_or_else(|| schema.uid.split('.').next().unwrap_or("shared"))
             .to_lowercase();
         schema.category = Some(cat);
+        schema.draft_and_publish = false;
+        schema.i18n_enabled = false;
+    } else if RESERVED_API_SLUGS.contains(&schema.singular_name.as_str())
+        || RESERVED_API_SLUGS.contains(&schema.plural_name.as_str())
+    {
+        return Err(ApiError::Validation {
+            message: format!(
+                "API slug '{}' / '{}' is reserved by built-in platform routes",
+                schema.singular_name, schema.plural_name
+            ),
+            details: serde_json::json!({
+                "singularName": schema.singular_name,
+                "pluralName": schema.plural_name
+            }),
+        });
     }
 
     let mut seen_fields = HashSet::new();
@@ -205,6 +226,37 @@ fn normalize_and_validate_schema(schema: &mut ContentTypeSchema) -> ApiResult<()
                 message: format!("Duplicate field name '{}'", f.name),
                 details: serde_json::json!({ "field": f.name }),
             });
+        }
+
+        if let (Some(min_l), Some(max_l)) = (f.validation.min_length, f.validation.max_length) {
+            if min_l > max_l {
+                return Err(ApiError::Validation {
+                    message: format!(
+                        "Field '{}': minLength ({min_l}) cannot exceed maxLength ({max_l})",
+                        f.name
+                    ),
+                    details: serde_json::json!({ "field": f.name }),
+                });
+            }
+        }
+        if let (Some(min_v), Some(max_v)) = (f.validation.min, f.validation.max) {
+            if min_v > max_v {
+                return Err(ApiError::Validation {
+                    message: format!("Field '{}': min ({min_v}) cannot exceed max ({max_v})", f.name),
+                    details: serde_json::json!({ "field": f.name }),
+                });
+            }
+        }
+        if let Some(regex) = &f.validation.regex {
+            if regex.len() > 256 {
+                return Err(ApiError::Validation {
+                    message: format!(
+                        "Field '{}': regex pattern exceeds maximum length of 256 characters",
+                        f.name
+                    ),
+                    details: serde_json::json!({ "field": f.name }),
+                });
+            }
         }
 
         match f.field_type {
@@ -406,4 +458,59 @@ fn is_api_slug(s: &str) -> bool {
     let first = chars.next().unwrap();
     first.is_ascii_lowercase()
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
+/// Detects transitive circular component references (`A -> B -> A`) via DFS.
+fn detect_component_cycle(
+    candidate: &ContentTypeSchema,
+    existing: &[ContentTypeSchema],
+) -> ApiResult<()> {
+    if candidate.kind != ContentKind::Component {
+        return Ok(());
+    }
+
+    let mut graph: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for s in existing {
+        if s.kind == ContentKind::Component && s.uid != candidate.uid {
+            graph.insert(s.uid.clone(), component_edges(s));
+        }
+    }
+    graph.insert(candidate.uid.clone(), component_edges(candidate));
+
+    let mut visited = HashSet::new();
+    let mut stack = vec![candidate.uid.clone()];
+    while let Some(node) = stack.pop() {
+        if let Some(neighbors) = graph.get(&node) {
+            for next in neighbors {
+                if next == &candidate.uid {
+                    return Err(ApiError::Validation {
+                        message: format!(
+                            "Circular component reference detected involving '{}'",
+                            candidate.uid
+                        ),
+                        details: serde_json::json!({ "uid": candidate.uid }),
+                    });
+                }
+                if visited.insert(next.clone()) {
+                    stack.push(next.clone());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn component_edges(schema: &ContentTypeSchema) -> Vec<String> {
+    let mut edges = Vec::new();
+    for f in &schema.fields {
+        if f.field_type == FieldType::Component {
+            if let Some(comp) = &f.component {
+                if let Some(uid) = &comp.component_uid {
+                    edges.push(uid.clone());
+                }
+            }
+        }
+    }
+    edges
 }

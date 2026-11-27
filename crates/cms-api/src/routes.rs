@@ -1047,4 +1047,244 @@ mod tests {
             .unwrap();
         assert_eq!(del_comp.status(), StatusCode::CONFLICT);
     }
+
+    #[tokio::test]
+    async fn phase2_schema_regressions() {
+        let app = test_router().await;
+
+        let reg = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/register-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "email": "schema-reg@rapi.dev",
+                            "password": "Password123!",
+                            "firstname": "Reg"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let reg_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(reg.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let jwt = reg_json["data"]["token"].as_str().unwrap().to_string();
+
+        // BUG-P2-04: Reserved API slug (`upload`) must be rejected with 400
+        let reserved = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/content-types")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "uid": "api::upload.upload",
+                            "kind": "collectionType",
+                            "singularName": "upload",
+                            "pluralName": "uploads",
+                            "displayName": "Upload",
+                            "fields": []
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reserved.status(), StatusCode::BAD_REQUEST);
+
+        // BUG-P2-05: minLength > maxLength must be rejected with 400
+        let bad_bounds = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/content-types")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "uid": "api::note.note",
+                            "kind": "collectionType",
+                            "singularName": "note",
+                            "pluralName": "notes",
+                            "displayName": "Note",
+                            "fields": [{
+                                "name": "title",
+                                "fieldType": "string",
+                                "validation": { "minLength": 20, "maxLength": 5 }
+                            }]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bad_bounds.status(), StatusCode::BAD_REQUEST);
+
+        // BUG-P2-02: Transitive circular component nesting (shared.a -> shared.b -> shared.a) blocked
+        let comp_b = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/content-types")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "uid": "shared.b",
+                            "kind": "component",
+                            "singularName": "b",
+                            "pluralName": "bs",
+                            "displayName": "Comp B",
+                            "fields": [{ "name": "label", "fieldType": "string" }]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(comp_b.status(), StatusCode::OK);
+        let comp_b_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(comp_b.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        // BUG-P2-08: Components always force draftAndPublish=false
+        assert_eq!(comp_b_json["data"]["draftAndPublish"], false);
+
+        let comp_a = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/content-types")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "uid": "shared.a",
+                            "kind": "component",
+                            "singularName": "a",
+                            "pluralName": "as",
+                            "displayName": "Comp A",
+                            "fields": [{
+                                "name": "nestedB",
+                                "fieldType": "component",
+                                "component": { "componentUid": "shared.b", "repeatable": false }
+                            }]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(comp_a.status(), StatusCode::OK);
+
+        // Now updating shared.b to embed shared.a creates A -> B -> A cycle -> must return 400
+        let cycle = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/content-types/shared.b")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "uid": "shared.b",
+                            "kind": "component",
+                            "singularName": "b",
+                            "pluralName": "bs",
+                            "displayName": "Comp B",
+                            "fields": [{
+                                "name": "nestedA",
+                                "fieldType": "component",
+                                "component": { "componentUid": "shared.a", "repeatable": false }
+                            }]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cycle.status(), StatusCode::BAD_REQUEST);
+
+        // BUG-P2-06: Metadata-only update on a collection type must NOT log a spurious DDL migration
+        let create_post = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/content-types")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "uid": "api::post.post",
+                            "kind": "collectionType",
+                            "singularName": "post",
+                            "pluralName": "posts",
+                            "displayName": "Post",
+                            "fields": [{ "name": "title", "fieldType": "string" }]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_post.status(), StatusCode::OK);
+
+        let meta_update = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/content-types/api::post.post")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "uid": "api::post.post",
+                            "kind": "collectionType",
+                            "singularName": "post",
+                            "pluralName": "posts",
+                            "displayName": "Blog Post",
+                            "description": "Updated metadata only",
+                            "fields": [{ "name": "title", "fieldType": "string" }]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(meta_update.status(), StatusCode::OK);
+
+        let insp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/content-types/api::post.post/inspection")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let insp_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(insp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!(insp_json["data"]["migrations"].as_array().unwrap().len(), 1);
+    }
 }
