@@ -1,5 +1,5 @@
 import { Compass } from "lucide-react";
-import { createBrowserRouter, Link } from "react-router-dom";
+import { createBrowserRouter, Link, Navigate } from "react-router-dom";
 import { AppLayout } from "@/app/layout";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -8,6 +8,7 @@ import { ContentManagerPage } from "@/features/content-manager/content-manager-p
 import { EntryEditorPage } from "@/features/content-manager/entry-editor-page";
 import { ContentTypeBuilderPage } from "@/features/content-type-builder/builder-page";
 import { OverviewPage } from "@/features/dashboard/overview-page";
+import { MarketplacePage } from "@/features/marketplace/marketplace-page";
 import { MediaLibraryPage } from "@/features/media/media-library-page";
 import { ModulePlaceholderPage } from "@/features/placeholders/workspace-views";
 import {
@@ -22,6 +23,7 @@ import {
   EmailSettingsPage,
   WebhooksPage,
 } from "@/features/settings/integrations-pages";
+import { SettingsLayout } from "@/features/settings/settings-layout";
 import { TokensPage } from "@/features/settings/tokens-page";
 import { UsersRolesPage } from "@/features/users-roles/users-roles-page";
 
@@ -68,6 +70,10 @@ export const router = createBrowserRouter([
         element: <MediaLibraryPage />,
       },
       {
+        path: "marketplace",
+        element: <MarketplacePage />,
+      },
+      {
         path: "users",
         element: <UsersRolesPage />,
       },
@@ -88,48 +94,58 @@ export const router = createBrowserRouter([
         element: <UsersRolesPage />,
       },
       {
-        path: "settings/api-tokens",
-        element: <TokensPage defaultKind="api" />,
-      },
-      {
-        path: "settings/admin-tokens",
-        element: <TokensPage defaultKind="admin" />,
-      },
-      {
-        path: "settings/i18n",
-        element: <LocalesPage />,
-      },
-      {
-        path: "settings/preview",
-        element: <PreviewSettingsPage />,
-      },
-      {
-        path: "settings/releases",
-        element: <ReleasesPage />,
-      },
-      {
-        path: "settings/workflows",
-        element: <WorkflowsPage />,
-      },
-      {
-        path: "settings/audit-logs",
-        element: <AuditLogsPage />,
-      },
-      {
-        path: "settings/webhooks",
-        element: <WebhooksPage />,
-      },
-      {
-        path: "settings/email",
-        element: <EmailSettingsPage />,
-      },
-      {
-        path: "settings/data-transfer",
-        element: <DataTransferPage />,
-      },
-      {
-        path: "settings/:section",
-        element: <ModulePlaceholderPage moduleKey="settings" />,
+        path: "settings",
+        element: <SettingsLayout />,
+        children: [
+          {
+            index: true,
+            element: <Navigate to="/settings/api-tokens" replace />,
+          },
+          {
+            path: "api-tokens",
+            element: <TokensPage defaultKind="api" />,
+          },
+          {
+            path: "admin-tokens",
+            element: <TokensPage defaultKind="admin" />,
+          },
+          {
+            path: "i18n",
+            element: <LocalesPage />,
+          },
+          {
+            path: "preview",
+            element: <PreviewSettingsPage />,
+          },
+          {
+            path: "releases",
+            element: <ReleasesPage />,
+          },
+          {
+            path: "workflows",
+            element: <WorkflowsPage />,
+          },
+          {
+            path: "audit-logs",
+            element: <AuditLogsPage />,
+          },
+          {
+            path: "webhooks",
+            element: <WebhooksPage />,
+          },
+          {
+            path: "email",
+            element: <EmailSettingsPage />,
+          },
+          {
+            path: "data-transfer",
+            element: <DataTransferPage />,
+          },
+          {
+            path: ":section",
+            element: <ModulePlaceholderPage moduleKey="settings" />,
+          },
+        ],
       },
       {
         path: "*",
@@ -140,7 +156,7 @@ export const router = createBrowserRouter([
             description="The requested admin route does not exist in this workspace."
             action={
               <Button size="sm" asChild>
-                <Link to="/">Return to system overview</Link>
+                <Link to="/">Return to home</Link>
               </Button>
             }
           />
