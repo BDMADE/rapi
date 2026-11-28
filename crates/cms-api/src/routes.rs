@@ -1,6 +1,7 @@
 use crate::auth::{admin_auth_routes, enforce_permission, RequireAdmin};
 use crate::content::content_api_routes;
 use crate::error::HttpApiError;
+use crate::governance::{audit_log_middleware, governance_routes};
 use crate::media::media_routes;
 use crate::openapi::ApiDoc;
 use crate::schema::admin_schema_routes;
@@ -48,6 +49,7 @@ pub fn build_router(services: ServiceContainer) -> Router {
         .merge(admin_auth_routes())
         .merge(admin_schema_routes())
         .merge(media_routes())
+        .merge(governance_routes())
         .merge(content_api_routes());
 
     if enable_docs {
@@ -58,6 +60,10 @@ pub fn build_router(services: ServiceContainer) -> Router {
 
     router
         .fallback(not_found_handler)
+        .layer(axum::middleware::from_fn_with_state(
+            services.clone(),
+            audit_log_middleware,
+        ))
         .layer(SetResponseHeaderLayer::if_not_present(
             header::X_CONTENT_TYPE_OPTIONS,
             HeaderValue::from_static("nosniff"),
@@ -2143,5 +2149,640 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(del_pub.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn phase5_i18n_preview_releases_workflows_and_audit_logs() {
+        let app = test_router().await;
+
+        // 1. Register Super Admin (also triggers audit middleware with password redaction!)
+        let reg = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/register-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "email": "gov@rapi.dev",
+                            "password": "SuperSecretPassword123!",
+                            "firstname": "Gov"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reg.status(), StatusCode::OK);
+        let reg_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(reg.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let jwt = reg_json["data"]["token"].as_str().unwrap().to_string();
+
+        // Grant public `api::post.post.find` permission so we can verify published locales on `/api/posts`
+        let _ = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/public-permissions")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "permissions": [{ "action": "api::post.post.find", "targetUid": "api::post.post" }]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // 2. i18n: Add 'fr' locale, block deleting default 'en' locale
+        let add_fr = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/i18n/locales")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "code": "fr",
+                            "name": "French (fr)",
+                            "isDefault": false
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(add_fr.status(), StatusCode::OK);
+
+        let del_default = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/admin/i18n/locales/1")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del_default.status(), StatusCode::BAD_REQUEST);
+
+        // 3. Create i18n-enabled content type `api::post.post` (localized `title`, non-localized `price`)
+        let ct_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/content-types")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "uid": "api::post.post",
+                            "kind": "collectionType",
+                            "singularName": "post",
+                            "pluralName": "posts",
+                            "displayName": "Post",
+                            "draftAndPublish": true,
+                            "i18nEnabled": true,
+                            "fields": [
+                                { "name": "title", "fieldType": "string", "required": true, "localized": true },
+                                { "name": "price", "fieldType": "integer", "required": false, "localized": false }
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ct_res.status(), StatusCode::OK);
+
+        // Author `en` draft
+        let en_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/content-manager/api%3A%3Apost.post?locale=en")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "data": { "title": "Hello World", "price": 50 } })
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(en_res.status(), StatusCode::OK);
+        let en_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(en_res.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let doc_id = en_json["data"]["documentId"].as_str().unwrap().to_string();
+
+        // Fill `fr` from `en`, then update `fr` with `title: "Bonjour"` and non-localized `price: 99`
+        let fill_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/admin/content-manager/api%3A%3Apost.post/{doc_id}/fill-from-locale"
+                    ))
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "sourceLocale": "en", "targetLocale": "fr" })
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fill_res.status(), StatusCode::OK);
+
+        let upd_fr = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!(
+                        "/admin/content-manager/api%3A%3Apost.post/{doc_id}?locale=fr"
+                    ))
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "data": { "title": "Bonjour le monde", "price": 99 } })
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(upd_fr.status(), StatusCode::OK);
+
+        // Verify non-localized `price` synced back to `en` while localized `title` remained "Hello World"!
+        let get_en = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/admin/content-manager/api%3A%3Apost.post/{doc_id}?locale=en"
+                    ))
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let get_en_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(get_en.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(get_en_json["data"]["title"], "Hello World");
+        assert_eq!(get_en_json["data"]["price"], 99);
+
+        // 4. Preview: Reject javascript: XSS URL, render built-in HTML preview with SAMEORIGIN frame header
+        let bad_prev = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/preview/configs/api%3A%3Apost.post")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "urlTemplate": "javascript:alert(1)",
+                            "isEnabled": true,
+                            "openMode": "split"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bad_prev.status(), StatusCode::BAD_REQUEST);
+
+        let html_prev = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/admin/preview/render/api%3A%3Apost.post/{doc_id}?locale=fr&token={jwt}"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(html_prev.status(), StatusCode::OK);
+        assert_eq!(
+            html_prev.headers().get("x-frame-options").unwrap(),
+            "SAMEORIGIN"
+        );
+
+        // 5. Review Workflows: Require `stage_reviewed` for publishing -> block premature publish!
+        let gate_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/workflows/stages/stage_reviewed")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "requireForPublish": true }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(gate_res.status(), StatusCode::OK);
+
+        let blocked_pub = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/admin/content-manager/api%3A%3Apost.post/{doc_id}/publish?locale=fr"
+                    ))
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(blocked_pub.status(), StatusCode::BAD_REQUEST);
+
+        // Move both `en` and `fr` to `stage_reviewed`
+        for loc in ["en", "fr"] {
+            let wf_up = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/admin/workflows/entries/{doc_id}"))
+                        .header("authorization", format!("Bearer {jwt}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "locale": loc,
+                                "stageId": "stage_reviewed"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(wf_up.status(), StatusCode::OK);
+        }
+
+        // 6. Releases: Create a release, attach both `en` and `fr` variants, and publish release!
+        let rel_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/releases")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "name": "Bilingual Launch" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rel_res.status(), StatusCode::OK);
+        let rel_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(rel_res.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let rel_id = rel_json["data"]["id"].as_str().unwrap().to_string();
+
+        for loc in ["en", "fr"] {
+            let add_e = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/admin/releases/{rel_id}/entries"))
+                        .header("authorization", format!("Bearer {jwt}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "contentTypeUid": "api::post.post",
+                                "documentId": doc_id,
+                                "locale": loc,
+                                "action": "publish"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(add_e.status(), StatusCode::OK);
+        }
+
+        let exec_rel = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/admin/releases/{rel_id}/publish"))
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(exec_rel.status(), StatusCode::OK);
+
+        // Verify `/api/posts?locale=fr` returns the live published French variant!
+        let pub_fr = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/posts?locale=fr")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(pub_fr.status(), StatusCode::OK);
+        let pub_fr_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(pub_fr.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(pub_fr_json["data"][0]["title"], "Bonjour le monde");
+        assert_eq!(pub_fr_json["data"][0]["price"], 99);
+
+        // 7. Audit Logs: Verify admin mutations were logged and plaintext passwords were [REDACTED]!
+        let audit_res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/audit-logs")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(audit_res.status(), StatusCode::OK);
+        let audit_raw = to_bytes(audit_res.into_body(), usize::MAX).await.unwrap();
+        let audit_text = String::from_utf8_lossy(&audit_raw);
+        assert!(audit_text.contains("release.publish"));
+        assert!(audit_text.contains("[REDACTED]"));
+        assert!(!audit_text.contains("SuperSecretPassword123!"));
+    }
+
+    #[tokio::test]
+    async fn phase5_security_and_atomicity_regressions() {
+        let app = test_router().await;
+
+        let reg = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/register-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "email": "p5sec@rapi.dev",
+                            "password": "StrongPassword123!",
+                            "firstname": "P5Sec"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let reg_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(reg.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let jwt = reg_json["data"]["token"].as_str().unwrap().to_string();
+
+        // Create content type `api::note.note`
+        let ct = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/content-types")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "uid": "api::note.note",
+                            "kind": "collectionType",
+                            "singularName": "note",
+                            "pluralName": "notes",
+                            "displayName": "Note",
+                            "draftAndPublish": true,
+                            "fields": [
+                                { "name": "title", "fieldType": "string", "required": true },
+                                { "name": "body", "fieldType": "text", "required": false }
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ct.status(), StatusCode::OK);
+
+        // BUG-P5-03: Large (>70 KB) JSON body succeeds through audit_log_middleware without 413
+        let large_text = "x".repeat(75_000);
+        let d1_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/content-manager/api%3A%3Anote.note")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "data": { "title": "Doc 1", "body": large_text } })
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(d1_res.status(), StatusCode::OK);
+        let d1_id = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(d1_res.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap()["data"]["documentId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Create second draft `d2` (missing required `title` so pre-flight will fail!)
+        let d2_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/content-manager/api%3A%3Anote.note")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::json!({ "data": {} }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(d2_res.status(), StatusCode::OK);
+        let d2_id = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(d2_res.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap()["data"]["documentId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // BUG-P5-04: Pre-flight release validation prevents publishing d1 when d2 is invalid!
+        let rel_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/releases")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::json!({ "name": "Atomic Test" }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let rel_id = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(rel_res.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap()["data"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        for did in [&d1_id, &d2_id] {
+            let add = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/admin/releases/{rel_id}/entries"))
+                        .header("authorization", format!("Bearer {jwt}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "contentTypeUid": "api::note.note",
+                                "documentId": did,
+                                "action": "publish"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(add.status(), StatusCode::OK);
+        }
+
+        let fail_pub = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/admin/releases/{rel_id}/publish"))
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fail_pub.status(), StatusCode::BAD_REQUEST);
+
+        // Verify d1 was NOT partially published!
+        let check_d1 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/admin/content-manager/api%3A%3Anote.note/{d1_id}?status=published"
+                    ))
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(check_d1.status(), StatusCode::NOT_FOUND);
+
+        // BUG-P5-01: Enable workflow publish gate -> direct PUT ?status=published & POST ?status=published are blocked!
+        let _ = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/workflows/stages/stage_reviewed")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "requireForPublish": true }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let bypass_put = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!(
+                        "/admin/content-manager/api%3A%3Anote.note/{d1_id}?status=published"
+                    ))
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "data": { "title": "Bypass attempt" } }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bypass_put.status(), StatusCode::BAD_REQUEST);
+
+        let bypass_post = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/content-manager/api%3A%3Anote.note?status=published")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "data": { "title": "Direct publish create" } })
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bypass_post.status(), StatusCode::BAD_REQUEST);
     }
 }

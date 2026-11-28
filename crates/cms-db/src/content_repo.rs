@@ -380,6 +380,7 @@ impl DynamicRepository {
             }
         } else {
             // Verify the document_id exists in at least one locale/status (unless SingleType)
+            // and pre-populate non-localized (`localized == false`) fields from any existing sibling locale row!
             if schema.kind != ContentKind::SingleType {
                 let any_exists: i64 = sqlx::query_scalar(
                     "SELECT COUNT(*) FROM documents WHERE content_type_uid = ? AND document_id = ?",
@@ -393,6 +394,41 @@ impl DynamicRepository {
                     return Err(ApiError::NotFound(format!(
                         "Document '{document_id}' not found"
                     )));
+                }
+            }
+            if schema.i18n_enabled {
+                let sibling_locale: Option<String> = sqlx::query_scalar(
+                    "SELECT locale FROM documents WHERE content_type_uid = ? AND document_id = ? ORDER BY CASE status WHEN 'draft' THEN 0 ELSE 1 END LIMIT 1",
+                )
+                .bind(&schema.uid)
+                .bind(document_id)
+                .fetch_optional(&self.pools.reader)
+                .await
+                .map_err(|e| ApiError::Internal(format!("find sibling locale failed: {e}")))?;
+
+                if let Some(sib_loc) = sibling_locale {
+                    if let Some(serde_json::Value::Object(sib_map)) = self
+                        .find_one(
+                            schema,
+                            document_id,
+                            &sib_loc,
+                            edit_status,
+                            &PopulateSpec::None,
+                            &[],
+                            false,
+                        )
+                        .await?
+                    {
+                        for f in schema
+                            .fields
+                            .iter()
+                            .filter(|f| f.field_type.has_physical_column() && !f.localized)
+                        {
+                            if let Some(val) = sib_map.get(&f.name) {
+                                merged_scalars.insert(f.name.clone(), val.clone());
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -418,6 +454,19 @@ impl DynamicRepository {
             actor_id,
         )
         .await?;
+
+        // Propagate modified non-localized (`localized == false`) fields across sibling locale rows of the same documentId
+        if schema.i18n_enabled {
+            sync_non_localized_scalars_in_tx(
+                &mut tx,
+                schema,
+                document_id,
+                locale,
+                edit_status,
+                scalar_patch,
+            )
+            .await?;
+        }
 
         apply_relation_mutations_in_tx(&mut tx, schema, document_id, locale, edit_status, relations)
             .await?;
@@ -654,6 +703,20 @@ impl DynamicRepository {
             .await
             .map_err(|e| ApiError::Internal(format!("delete fts rows failed: {e}")))?;
 
+            sqlx::query("DELETE FROM workflow_entries WHERE document_id = ? AND locale = ?")
+                .bind(document_id)
+                .bind(loc)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| ApiError::Internal(format!("delete workflow_entries failed: {e}")))?;
+
+            sqlx::query("DELETE FROM release_entries WHERE document_id = ? AND locale = ?")
+                .bind(document_id)
+                .bind(loc)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| ApiError::Internal(format!("delete release_entries failed: {e}")))?;
+
             res.rows_affected()
         } else {
             let res = sqlx::query(&format!(
@@ -699,6 +762,18 @@ impl DynamicRepository {
             .execute(&mut *tx)
             .await
             .map_err(|e| ApiError::Internal(format!("delete fts rows failed: {e}")))?;
+
+            sqlx::query("DELETE FROM workflow_entries WHERE document_id = ?")
+                .bind(document_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| ApiError::Internal(format!("delete workflow_entries failed: {e}")))?;
+
+            sqlx::query("DELETE FROM release_entries WHERE document_id = ?")
+                .bind(document_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| ApiError::Internal(format!("delete release_entries failed: {e}")))?;
 
             res.rows_affected()
         };
@@ -1110,6 +1185,55 @@ impl DynamicRepository {
 }
 
 // --- Internal SQLite Transaction Helpers ---
+
+async fn sync_non_localized_scalars_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    schema: &ContentTypeSchema,
+    document_id: &str,
+    active_locale: &str,
+    status: DocumentStatus,
+    scalar_patch: &BTreeMap<String, serde_json::Value>,
+) -> ApiResult<()> {
+    let non_localized: Vec<&FieldDefinition> = schema
+        .fields
+        .iter()
+        .filter(|f| {
+            f.field_type.has_physical_column()
+                && !f.localized
+                && !f.unique
+                && scalar_patch.contains_key(&f.name)
+        })
+        .collect();
+
+    if non_localized.is_empty() {
+        return Ok(());
+    }
+
+    let table_name = table_name_for_uid(&schema.uid);
+    let mut set_parts = Vec::with_capacity(non_localized.len() + 1);
+    for f in &non_localized {
+        set_parts.push(format!("\"{}\" = ?", f.name));
+    }
+    set_parts.push("\"updated_at\" = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')".to_string());
+
+    let sql = format!(
+        "UPDATE \"{table_name}\" SET {} WHERE document_id = ? AND locale != ? AND status = ?",
+        set_parts.join(", ")
+    );
+    let mut q = sqlx::query(&sql);
+    for f in &non_localized {
+        q = bind_json_for_field(q, f, scalar_patch.get(&f.name));
+    }
+    q = q
+        .bind(document_id)
+        .bind(active_locale)
+        .bind(status.as_str());
+
+    if let Err(e) = q.execute(&mut **tx).await {
+        return Err(map_sqlite_write_error(e));
+    }
+    Ok(())
+}
 
 async fn upsert_row_in_tx(
     tx: &mut Transaction<'_, Sqlite>,

@@ -385,6 +385,7 @@ dependencies = [
  "cms-core",
  "cms-db",
  "cms-services",
+ "futures-util",
  "image",
  "serde",
  "serde_json",

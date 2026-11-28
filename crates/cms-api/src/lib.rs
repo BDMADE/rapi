@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod content;
 pub mod error;
+pub mod governance;
 pub mod media;
 pub mod openapi;
 pub mod qs;

@@ -60,6 +60,11 @@ impl WorkerRunner {
                 }
             }
 
+            // Sweep any scheduled releases whose `scheduled_at <= now`
+            if let Err(err) = self.services.governance.process_due_releases().await {
+                error!(error = %err, "Scheduled release sweep failed");
+            }
+
             if !processed_any {
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_millis(750)) => {}
@@ -78,10 +83,16 @@ impl WorkerRunner {
 
     async fn handle_job(&self, job: &JobMessage) -> ApiResult<()> {
         debug!(job_id = %job.id, queue = %job.queue, "Dispatching background job");
-        if job.queue == "rapi:jobs:media" {
-            if let Some(file_id) = job.payload.get("fileId").and_then(|v| v.as_i64()) {
-                self.services.media.process_responsive_formats(file_id).await?;
+        match job.queue.as_str() {
+            "rapi:jobs:media" => {
+                if let Some(file_id) = job.payload.get("fileId").and_then(|v| v.as_i64()) {
+                    self.services.media.process_responsive_formats(file_id).await?;
+                }
             }
+            "rapi:jobs:release" => {
+                let _ = self.services.governance.process_due_releases().await?;
+            }
+            _ => {}
         }
         Ok(())
     }

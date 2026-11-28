@@ -1,5 +1,6 @@
 use crate::auth::AuthService;
 use crate::content::ContentService;
+use crate::governance::GovernanceService;
 use crate::media::MediaService;
 use crate::schema::SchemaService;
 use crate::system::SystemService;
@@ -8,8 +9,8 @@ use cms_core::{
     LocalPubSubBackend, PubSubBackend, QueueBackend,
 };
 use cms_db::{
-    AuthRepository, DbPools, DynamicRepository, MediaRepository, PlatformRepository, RedisRuntime,
-    SchemaEngine, SqliteQueueBackend,
+    AuthRepository, DbPools, DynamicRepository, GovernanceRepository, MediaRepository,
+    PlatformRepository, RedisRuntime, SchemaEngine, SqliteQueueBackend,
 };
 use cms_plugin_api::PluginRegistry;
 use std::sync::Arc;
@@ -29,6 +30,7 @@ pub struct ServiceContainer {
     pub schema: SchemaService,
     pub content: ContentService,
     pub media: MediaService,
+    pub governance: GovernanceService,
     pub started_at: Instant,
 }
 
@@ -80,6 +82,14 @@ impl ServiceContainer {
         let storage = Arc::new(LocalDiskProvider::new(&config.upload_dir)?);
         let media_repo = MediaRepository::new(db.clone());
         let media = MediaService::new(media_repo, storage, queue.clone());
+        let gov_repo = GovernanceRepository::new(db.clone());
+        let governance = GovernanceService::new(
+            gov_repo,
+            schema.clone(),
+            content.clone(),
+            cache.clone(),
+            queue.clone(),
+        );
 
         Ok(Self {
             config,
@@ -93,6 +103,7 @@ impl ServiceContainer {
             schema,
             content,
             media,
+            governance,
             started_at,
         })
     }

@@ -114,16 +114,20 @@ async fn rest_find_or_single_handler(
 
     let params = ContentQueryParams::parse_query_str(raw_qs.as_deref())?;
     check_draft_access(&actor, params.status)?;
-    let doc_query = params.into_document_query();
+    let mut doc_query = params.into_document_query();
+    let resolved_locale = services
+        .governance
+        .resolve_and_validate_locale(schema.i18n_enabled, doc_query.locale.as_deref(), false)
+        .await?;
+    doc_query.locale = Some(resolved_locale.clone());
 
     if schema.kind == ContentKind::SingleType {
-        let locale = doc_query.locale.as_deref().unwrap_or("en");
         let status = doc_query.status.unwrap_or(DocumentStatus::Published);
         let doc = services
             .content
             .find_single(
                 &schema,
-                locale,
+                &resolved_locale,
                 status,
                 &doc_query.populate,
                 &doc_query.fields,
@@ -161,7 +165,10 @@ async fn rest_find_one_handler(
     let params = ContentQueryParams::parse_query_str(raw_qs.as_deref())?;
     check_draft_access(&actor, params.status)?;
     let doc_query = params.into_document_query();
-    let locale = doc_query.locale.as_deref().unwrap_or("en");
+    let locale = services
+        .governance
+        .resolve_and_validate_locale(schema.i18n_enabled, doc_query.locale.as_deref(), false)
+        .await?;
     let status = doc_query.status.unwrap_or(DocumentStatus::Published);
 
     let doc = services
@@ -169,7 +176,7 @@ async fn rest_find_one_handler(
         .find_one(
             &schema,
             &document_id,
-            locale,
+            &locale,
             status,
             &doc_query.populate,
             &doc_query.fields,
@@ -195,15 +202,21 @@ async fn rest_create_handler(
     enforce_permission(&actor, &format!("{}.create", schema.uid), Some(&schema.uid))?;
 
     let params = ContentQueryParams::parse_query_str(raw_qs.as_deref())?;
-    let locale = params.locale.as_deref().unwrap_or("en");
+    let locale = services
+        .governance
+        .resolve_and_validate_locale(schema.i18n_enabled, params.locale.as_deref(), true)
+        .await?;
     // Strapi v5 REST Content API defaults `POST /api/:plural` to `status=published` unless `?status=draft` is specified
     let target_status = params.status.unwrap_or(DocumentStatus::Published);
+    if schema.draft_and_publish && target_status == DocumentStatus::Published {
+        services.governance.enforce_new_entry_publish_gate().await?;
+    }
 
     let created = services
         .content
         .create_entry(
             &schema,
-            locale,
+            &locale,
             target_status,
             &body.data,
             actor_id(&actor),
@@ -224,15 +237,24 @@ async fn rest_update_handler(
     enforce_permission(&actor, &format!("{}.update", schema.uid), Some(&schema.uid))?;
 
     let params = ContentQueryParams::parse_query_str(raw_qs.as_deref())?;
-    let locale = params.locale.as_deref().unwrap_or("en");
+    let locale = services
+        .governance
+        .resolve_and_validate_locale(schema.i18n_enabled, params.locale.as_deref(), true)
+        .await?;
     let target_status = params.status.unwrap_or(DocumentStatus::Published);
+    if schema.draft_and_publish && target_status == DocumentStatus::Published {
+        services
+            .governance
+            .enforce_publish_workflow_gate(&document_id, &locale)
+            .await?;
+    }
 
     let updated = services
         .content
         .update_entry(
             &schema,
             &document_id,
-            locale,
+            &locale,
             target_status,
             &body.data,
             actor_id(&actor),
@@ -278,14 +300,17 @@ async fn rest_put_single_handler(
     enforce_permission(&actor, &format!("{}.update", schema.uid), Some(&schema.uid))?;
 
     let params = ContentQueryParams::parse_query_str(raw_qs.as_deref())?;
-    let locale = params.locale.as_deref().unwrap_or("en");
+    let locale = services
+        .governance
+        .resolve_and_validate_locale(schema.i18n_enabled, params.locale.as_deref(), true)
+        .await?;
     let target_status = params.status.unwrap_or(DocumentStatus::Published);
 
     let doc = services
         .content
         .upsert_single(
             &schema,
-            locale,
+            &locale,
             target_status,
             &body.data,
             actor_id(&actor),
@@ -310,7 +335,10 @@ async fn rest_delete_single_handler(
     enforce_permission(&actor, &format!("{}.delete", schema.uid), Some(&schema.uid))?;
 
     let params = ContentQueryParams::parse_query_str(raw_qs.as_deref())?;
-    let locale = params.locale.as_deref().unwrap_or("en");
+    let locale = services
+        .governance
+        .resolve_and_validate_locale(schema.i18n_enabled, params.locale.as_deref(), false)
+        .await?;
     let check_status = if schema.draft_and_publish {
         DocumentStatus::Draft
     } else {
@@ -318,7 +346,7 @@ async fn rest_delete_single_handler(
     };
     let Some(existing) = services
         .content
-        .find_single(&schema, locale, check_status, &PopulateSpec::None, &[], false)
+        .find_single(&schema, &locale, check_status, &PopulateSpec::None, &[], false)
         .await?
     else {
         return Err(HttpApiError(ApiError::NotFound(
@@ -349,6 +377,9 @@ async fn admin_list_entries_handler(
     enforce_permission(&actor, "plugin::content-manager.explorer.read", Some(&uid))?;
     let params = ContentQueryParams::parse_query_str(raw_qs.as_deref())?;
     let mut query = params.into_document_query();
+    if query.locale.is_none() {
+        query.locale = Some(services.governance.default_locale().await?);
+    }
     if query.populate == PopulateSpec::None {
         query.populate = PopulateSpec::All;
     }
@@ -371,18 +402,24 @@ async fn admin_create_entry_handler(
     )?;
     let schema = services.schema.get_schema(&uid).await?;
     let params = ContentQueryParams::parse_query_str(raw_qs.as_deref())?;
-    let locale = params.locale.as_deref().unwrap_or("en");
+    let locale = services
+        .governance
+        .resolve_and_validate_locale(schema.i18n_enabled, params.locale.as_deref(), true)
+        .await?;
     let target_status = params.status.unwrap_or(if schema.draft_and_publish {
         DocumentStatus::Draft
     } else {
         DocumentStatus::Published
     });
+    if schema.draft_and_publish && target_status == DocumentStatus::Published {
+        services.governance.enforce_new_entry_publish_gate().await?;
+    }
 
     let doc = services
         .content
         .create_entry(
             &schema,
-            locale,
+            &locale,
             target_status,
             &body.data,
             actor_id(&actor),
@@ -401,7 +438,10 @@ async fn admin_get_single_handler(
     enforce_permission(&actor, "plugin::content-manager.explorer.read", Some(&uid))?;
     let schema = services.schema.get_schema(&uid).await?;
     let params = ContentQueryParams::parse_query_str(raw_qs.as_deref())?;
-    let locale = params.locale.as_deref().unwrap_or("en");
+    let locale = services
+        .governance
+        .resolve_and_validate_locale(schema.i18n_enabled, params.locale.as_deref(), false)
+        .await?;
     let status = params.status.unwrap_or(if schema.draft_and_publish {
         DocumentStatus::Draft
     } else {
@@ -410,7 +450,7 @@ async fn admin_get_single_handler(
 
     let doc = services
         .content
-        .find_single(&schema, locale, status, &PopulateSpec::All, &[], false)
+        .find_single(&schema, &locale, status, &PopulateSpec::All, &[], false)
         .await?;
     Ok(Json(ApiResponse::new(doc)))
 }
@@ -429,7 +469,10 @@ async fn admin_put_single_handler(
     )?;
     let schema = services.schema.get_schema(&uid).await?;
     let params = ContentQueryParams::parse_query_str(raw_qs.as_deref())?;
-    let locale = params.locale.as_deref().unwrap_or("en");
+    let locale = services
+        .governance
+        .resolve_and_validate_locale(schema.i18n_enabled, params.locale.as_deref(), true)
+        .await?;
     let status = params.status.unwrap_or(if schema.draft_and_publish {
         DocumentStatus::Draft
     } else {
@@ -440,7 +483,7 @@ async fn admin_put_single_handler(
         .content
         .upsert_single(
             &schema,
-            locale,
+            &locale,
             status,
             &body.data,
             actor_id(&actor),
@@ -459,7 +502,10 @@ async fn admin_get_entry_handler(
     enforce_permission(&actor, "plugin::content-manager.explorer.read", Some(&uid))?;
     let schema = services.schema.get_schema(&uid).await?;
     let params = ContentQueryParams::parse_query_str(raw_qs.as_deref())?;
-    let locale = params.locale.as_deref().unwrap_or("en");
+    let locale = services
+        .governance
+        .resolve_and_validate_locale(schema.i18n_enabled, params.locale.as_deref(), false)
+        .await?;
     let status = params.status.unwrap_or(if schema.draft_and_publish {
         DocumentStatus::Draft
     } else {
@@ -471,7 +517,7 @@ async fn admin_get_entry_handler(
         .find_one(
             &schema,
             &document_id,
-            locale,
+            &locale,
             status,
             &PopulateSpec::All,
             &[],
@@ -495,19 +541,28 @@ async fn admin_update_entry_handler(
     )?;
     let schema = services.schema.get_schema(&uid).await?;
     let params = ContentQueryParams::parse_query_str(raw_qs.as_deref())?;
-    let locale = params.locale.as_deref().unwrap_or("en");
+    let locale = services
+        .governance
+        .resolve_and_validate_locale(schema.i18n_enabled, params.locale.as_deref(), true)
+        .await?;
     let status = params.status.unwrap_or(if schema.draft_and_publish {
         DocumentStatus::Draft
     } else {
         DocumentStatus::Published
     });
+    if schema.draft_and_publish && status == DocumentStatus::Published {
+        services
+            .governance
+            .enforce_publish_workflow_gate(&document_id, &locale)
+            .await?;
+    }
 
     let doc = services
         .content
         .update_entry(
             &schema,
             &document_id,
-            locale,
+            &locale,
             status,
             &body.data,
             actor_id(&actor),
@@ -551,10 +606,17 @@ async fn admin_publish_handler(
         Some(&uid),
     )?;
     let params = ContentQueryParams::parse_query_str(raw_qs.as_deref())?;
-    let locale = params.locale.as_deref().unwrap_or("en");
+    let locale = match params.locale.as_deref() {
+        Some(l) if !l.is_empty() => l.to_string(),
+        _ => services.governance.default_locale().await?,
+    };
+    services
+        .governance
+        .enforce_publish_workflow_gate(&document_id, &locale)
+        .await?;
     let doc = services
         .content
-        .publish_entry(&uid, &document_id, locale, actor_id(&actor))
+        .publish_entry(&uid, &document_id, &locale, actor_id(&actor))
         .await?;
     Ok(Json(ApiResponse::new(doc)))
 }
@@ -571,10 +633,13 @@ async fn admin_unpublish_handler(
         Some(&uid),
     )?;
     let params = ContentQueryParams::parse_query_str(raw_qs.as_deref())?;
-    let locale = params.locale.as_deref().unwrap_or("en");
+    let locale = match params.locale.as_deref() {
+        Some(l) if !l.is_empty() => l.to_string(),
+        _ => services.governance.default_locale().await?,
+    };
     let doc = services
         .content
-        .unpublish_entry(&uid, &document_id, locale)
+        .unpublish_entry(&uid, &document_id, &locale)
         .await?;
     Ok(Json(ApiResponse::new(doc)))
 }
@@ -590,12 +655,19 @@ async fn admin_bulk_publish_handler(
         "plugin::content-manager.explorer.publish",
         Some(&uid),
     )?;
-    let locale = body.locale.as_deref().unwrap_or("en");
+    let locale = match body.locale.as_deref() {
+        Some(l) if !l.is_empty() => l.to_string(),
+        _ => services.governance.default_locale().await?,
+    };
     let mut count = 0;
     for doc_id in &body.document_ids {
         services
+            .governance
+            .enforce_publish_workflow_gate(doc_id, &locale)
+            .await?;
+        services
             .content
-            .publish_entry(&uid, doc_id, locale, actor_id(&actor))
+            .publish_entry(&uid, doc_id, &locale, actor_id(&actor))
             .await?;
         count += 1;
     }
@@ -637,10 +709,13 @@ async fn admin_list_versions_handler(
 ) -> Result<Json<ApiResponse<Vec<ContentVersionDto>>>, HttpApiError> {
     enforce_permission(&actor, "plugin::content-manager.explorer.read", Some(&uid))?;
     let params = ContentQueryParams::parse_query_str(raw_qs.as_deref())?;
-    let locale = params.locale.as_deref().unwrap_or("en");
+    let locale = match params.locale.as_deref() {
+        Some(l) if !l.is_empty() => l.to_string(),
+        _ => services.governance.default_locale().await?,
+    };
     let versions = services
         .content
-        .list_versions(&uid, &document_id, locale)
+        .list_versions(&uid, &document_id, &locale)
         .await?;
     Ok(Json(ApiResponse::new(versions)))
 }

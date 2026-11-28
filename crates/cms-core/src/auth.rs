@@ -318,6 +318,54 @@ pub fn builtin_permission_catalog() -> Vec<PermissionCatalogItem> {
             category: "Media Library".into(),
             description: "Upload new files and create folders.".into(),
         },
+        PermissionCatalogItem {
+            action: "plugin::i18n.locale.read".into(),
+            label: "Read locales".into(),
+            category: "Internationalization".into(),
+            description: "List configured i18n locales.".into(),
+        },
+        PermissionCatalogItem {
+            action: "plugin::i18n.locale.update".into(),
+            label: "Manage locales".into(),
+            category: "Internationalization".into(),
+            description: "Create, update, set default, and delete i18n locales.".into(),
+        },
+        PermissionCatalogItem {
+            action: "admin::preview.update".into(),
+            label: "Configure preview URLs".into(),
+            category: "Governance".into(),
+            description: "Manage frontend preview URL templates per content type.".into(),
+        },
+        PermissionCatalogItem {
+            action: "admin::releases.read".into(),
+            label: "Read releases".into(),
+            category: "Governance".into(),
+            description: "Inspect scheduled and completed release groups.".into(),
+        },
+        PermissionCatalogItem {
+            action: "admin::releases.update".into(),
+            label: "Manage & publish releases".into(),
+            category: "Governance".into(),
+            description: "Create, edit, schedule, and publish release groups.".into(),
+        },
+        PermissionCatalogItem {
+            action: "admin::workflows.read".into(),
+            label: "Read review workflows".into(),
+            category: "Governance".into(),
+            description: "View workflow stages and entry assignments.".into(),
+        },
+        PermissionCatalogItem {
+            action: "admin::workflows.update".into(),
+            label: "Manage workflow stages".into(),
+            category: "Governance".into(),
+            description: "Create, reorder, and configure role/publish gates on workflow stages.".into(),
+        },
+        PermissionCatalogItem {
+            action: "admin::audit-logs.read".into(),
+            label: "Read audit logs".into(),
+            category: "Governance".into(),
+            description: "Query and inspect administrator mutation audit trails.".into(),
+        },
     ]
 }
 

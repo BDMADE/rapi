@@ -4,7 +4,13 @@ import {
   Check,
   CheckCircle2,
   Copy,
+  Diff,
+  ExternalLink,
+  Eye,
+  GitPullRequest,
+  Globe,
   History,
+  Rocket,
   RotateCcw,
   Save,
   Sparkles,
@@ -21,11 +27,14 @@ import {
   CardContent,
   CardHeader,
   CardTitle,
+  Dialog,
+  DialogContent,
   Input,
   Select,
   Switch,
   useToast,
 } from "@/components/ui";
+import { useAuthStore } from "@/features/auth/auth-store";
 import { BlocksEditor } from "@/features/content-manager/blocks-editor";
 import {
   ComponentFieldEditor,
@@ -33,7 +42,12 @@ import {
 } from "@/features/content-manager/dynamic-zone-editor";
 import { RelationPicker } from "@/features/content-manager/relation-picker";
 import { MediaPicker } from "@/features/media/media-picker";
-import { api, type ContentTypeSchema, type FieldDefinition } from "@/lib/api";
+import {
+  api,
+  type ContentTypeSchema,
+  type ContentVersionDto,
+  type FieldDefinition,
+} from "@/lib/api";
 
 function isFieldVisible(field: FieldDefinition, values: Record<string, unknown>): boolean {
   const rule = field.validation?.conditions?.visible;
@@ -97,6 +111,8 @@ export function EntryEditorPage() {
   const { pushToast } = useToast();
   const queryClient = useQueryClient();
   const activeLocale = useUiStore((s) => s.activeLocale);
+  const setActiveLocale = useUiStore((s) => s.setActiveLocale);
+  const authToken = useAuthStore((s) => s.token);
 
   const isCreate = documentId === "create";
   const isSingle = documentId === "single";
@@ -129,10 +145,16 @@ export function EntryEditorPage() {
 
   const entryQuery = useQuery({
     queryKey: ["cm-entry", uid, documentId, activeLocale],
-    queryFn: () =>
-      isSingle
-        ? api.getSingleEntry(uid!, activeLocale)
-        : api.getEntry(uid!, documentId!, activeLocale),
+    queryFn: async () => {
+      try {
+        return isSingle
+          ? await api.getSingleEntry(uid!, activeLocale)
+          : await api.getEntry(uid!, documentId!, activeLocale);
+      } catch {
+        // Unauthored locale variant of an existing documentId returns null so user can author or fill-from-locale
+        return null;
+      }
+    },
     enabled: Boolean(uid && !isCreate),
   });
 
@@ -146,8 +168,47 @@ export function EntryEditorPage() {
     enabled: Boolean(uid && resolvedDocId),
   });
 
+  const localesQuery = useQuery({
+    queryKey: ["locales"],
+    queryFn: api.listLocales,
+  });
+
+  const docLocalesQuery = useQuery({
+    queryKey: ["cm-doc-locales", uid, resolvedDocId],
+    queryFn: () => api.listDocumentLocales(uid!, resolvedDocId!),
+    enabled: Boolean(uid && resolvedDocId && schema?.i18nEnabled),
+  });
+
+  const workflowStagesQuery = useQuery({
+    queryKey: ["workflow-stages"],
+    queryFn: api.listWorkflowStages,
+  });
+
+  const workflowEntryQuery = useQuery({
+    queryKey: ["workflow-entry", resolvedDocId, activeLocale],
+    queryFn: () => api.getWorkflowEntry(resolvedDocId!, activeLocale),
+    enabled: Boolean(resolvedDocId),
+  });
+
+  const adminUsersQuery = useQuery({
+    queryKey: ["admin-users"],
+    queryFn: api.listAdminUsers,
+  });
+
+  const releasesQuery = useQuery({
+    queryKey: ["releases"],
+    queryFn: api.listReleases,
+    enabled: Boolean(resolvedDocId),
+  });
+
   const [formValues, setFormValues] = useState<Record<string, unknown>>({});
   const [copiedId, setCopiedId] = useState(false);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewTick, setPreviewTick] = useState(0);
+  const [diffVersion, setDiffVersion] = useState<ContentVersionDto | null>(null);
+  const [selectedReleaseId, setSelectedReleaseId] = useState("");
+  const [fillSourceLocale, setFillSourceLocale] = useState("");
 
   useEffect(() => {
     if (isCreate) {
@@ -160,10 +221,56 @@ export function EntryEditorPage() {
         }
       }
       setFormValues(next);
-    } else if (isSingle && entryQuery.isSuccess && !entryQuery.data) {
+    } else if (entryQuery.isSuccess && !entryQuery.data) {
       setFormValues({});
     }
-  }, [isCreate, isSingle, entryQuery.data, entryQuery.isSuccess, schema]);
+  }, [isCreate, entryQuery.data, entryQuery.isSuccess, schema]);
+
+  // Subscribe to SSE `/api/preview/events` when Live Preview split pane is open
+  useEffect(() => {
+    if (!previewOpen || !authToken || !resolvedDocId) return;
+    const es = new EventSource(api.getPreviewSseUrl(authToken));
+    const onChanged = (ev: MessageEvent) => {
+      try {
+        const data = JSON.parse(ev.data) as { uid?: string; documentId?: string };
+        if (data.documentId === resolvedDocId) {
+          setPreviewTick((t) => t + 1);
+        }
+      } catch {
+        setPreviewTick((t) => t + 1);
+      }
+    };
+    es.addEventListener("document.changed", onChanged);
+    return () => {
+      es.removeEventListener("document.changed", onChanged);
+      es.close();
+    };
+  }, [previewOpen, authToken, resolvedDocId]);
+
+  // Automatically keep the split Live Preview iframe synchronized when switching locales
+  useEffect(() => {
+    if (!previewOpen || !uid || !resolvedDocId) return;
+    let cancelled = false;
+    api
+      .resolvePreviewUrl(
+        uid,
+        resolvedDocId,
+        activeLocale,
+        schema?.draftAndPublish ? "draft" : "published",
+      )
+      .then((resolved) => {
+        if (cancelled) return;
+        const finalUrl =
+          resolved.isBuiltin && authToken
+            ? `${resolved.url}&token=${encodeURIComponent(authToken)}`
+            : resolved.url;
+        setPreviewUrl(finalUrl);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [previewOpen, uid, resolvedDocId, activeLocale, authToken, schema?.draftAndPublish]);
 
   const setField = (name: string, val: unknown) => {
     setFormValues((prev) => ({ ...prev, [name]: val }));
@@ -184,7 +291,9 @@ export function EntryEditorPage() {
       queryClient.invalidateQueries({ queryKey: ["cm-entries"] });
       queryClient.invalidateQueries({ queryKey: ["cm-entry"] });
       queryClient.invalidateQueries({ queryKey: ["cm-versions"] });
+      queryClient.invalidateQueries({ queryKey: ["cm-doc-locales"] });
       queryClient.invalidateQueries({ queryKey: ["system-overview"] });
+      setPreviewTick((t) => t + 1);
       pushToast({ title: "Saved changes", tone: "success" });
       if (isCreate && saved.documentId) {
         navigate(
@@ -240,11 +349,90 @@ export function EntryEditorPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["cm-entry"] });
       queryClient.invalidateQueries({ queryKey: ["cm-versions"] });
+      setDiffVersion(null);
+      setPreviewTick((t) => t + 1);
       pushToast({ title: "Historical version restored to draft", tone: "success" });
     },
     onError: (e: Error) =>
       pushToast({ title: "Restore failed", description: e.message, tone: "error" }),
   });
+
+  const fillLocaleMut = useMutation({
+    mutationFn: (sourceLocale: string) =>
+      api.fillFromLocale(uid!, resolvedDocId!, sourceLocale, activeLocale),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["cm-entry"] });
+      queryClient.invalidateQueries({ queryKey: ["cm-doc-locales"] });
+      queryClient.invalidateQueries({ queryKey: ["cm-versions"] });
+      pushToast({ title: `Filled '${activeLocale}' fields from source locale`, tone: "success" });
+    },
+    onError: (e: Error) =>
+      pushToast({ title: "Fill locale failed", description: e.message, tone: "error" }),
+  });
+
+  const workflowMut = useMutation({
+    mutationFn: (payload: { stageId: string; assigneeId: string | null }) =>
+      api.updateWorkflowEntry(resolvedDocId!, {
+        locale: activeLocale,
+        stageId: payload.stageId,
+        assigneeId: payload.assigneeId,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["workflow-entry"] });
+      pushToast({ title: "Updated review workflow", tone: "success" });
+    },
+    onError: (e: Error) =>
+      pushToast({ title: "Workflow restricted", description: e.message, tone: "error" }),
+  });
+
+  const addToReleaseMut = useMutation({
+    mutationFn: (releaseId: string) =>
+      api.addReleaseEntry(releaseId, {
+        contentTypeUid: uid!,
+        documentId: resolvedDocId!,
+        locale: activeLocale,
+        action: "publish",
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["releases"] });
+      setSelectedReleaseId("");
+      pushToast({ title: "Added entry to release", tone: "success" });
+    },
+    onError: (e: Error) =>
+      pushToast({ title: "Release error", description: e.message, tone: "error" }),
+  });
+
+  const handleTogglePreview = async () => {
+    if (!uid || !resolvedDocId) return;
+    if (previewOpen) {
+      setPreviewOpen(false);
+      return;
+    }
+    try {
+      const resolved = await api.resolvePreviewUrl(
+        uid,
+        resolvedDocId,
+        activeLocale,
+        schema?.draftAndPublish ? "draft" : "published",
+      );
+      const finalUrl =
+        resolved.isBuiltin && authToken
+          ? `${resolved.url}&token=${encodeURIComponent(authToken)}`
+          : resolved.url;
+      if (resolved.openMode === "tab" && !resolved.isBuiltin) {
+        window.open(finalUrl, "_blank", "noopener,noreferrer");
+      } else {
+        setPreviewUrl(finalUrl);
+        setPreviewOpen(true);
+      }
+    } catch (e) {
+      pushToast({
+        title: "Preview unavailable",
+        description: e instanceof Error ? e.message : "Save document first",
+        tone: "error",
+      });
+    }
+  };
 
   if (!schema) {
     return <p className="text-xs text-zinc-500">Loading schema...</p>;
@@ -292,6 +480,16 @@ export function EntryEditorPage() {
         </div>
 
         <div className="flex items-center gap-2">
+          {resolvedDocId && entryQuery.data && (
+            <Button
+              size="sm"
+              variant={previewOpen ? "primary" : "secondary"}
+              onClick={handleTogglePreview}
+            >
+              <Eye className="h-3.5 w-3.5" />
+              {previewOpen ? "Close preview" : "Live preview"}
+            </Button>
+          )}
           <Button
             size="sm"
             variant={schema.draftAndPublish ? "secondary" : "primary"}
@@ -328,10 +526,10 @@ export function EntryEditorPage() {
         </div>
       </div>
 
-      {/* Two-column editor + right inspector rail */}
+      {/* Two-column editor (or split Live Preview) + right inspector rail */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         {/* Form canvas */}
-        <Card className="lg:col-span-8">
+        <Card className={previewOpen ? "lg:col-span-5" : "lg:col-span-8"}>
           <CardContent className="space-y-4">
             {schema.fields.length === 0 ? (
               <p className="text-xs text-zinc-500">
@@ -356,8 +554,36 @@ export function EntryEditorPage() {
           </CardContent>
         </Card>
 
-        {/* Right rail: Document info + Version History */}
-        <div className="space-y-4 lg:col-span-4">
+        {previewOpen && previewUrl && (
+          <Card className="lg:col-span-4">
+            <CardHeader className="flex flex-row items-center justify-between py-2.5">
+              <div className="flex items-center gap-1.5">
+                <Eye className="h-3.5 w-3.5 text-indigo-700" />
+                <CardTitle>Live Preview (SSE)</CardTitle>
+              </div>
+              <a
+                href={previewUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-[11px] font-medium text-indigo-700 hover:underline"
+              >
+                Open
+                <ExternalLink className="h-3 w-3" />
+              </a>
+            </CardHeader>
+            <div className="h-[540px] border-t border-zinc-200 bg-zinc-50">
+              <iframe
+                key={`${previewUrl}-${previewTick}`}
+                src={previewUrl}
+                title="Live Document Preview"
+                className="h-full w-full border-0"
+              />
+            </div>
+          </Card>
+        )}
+
+        {/* Right rail: Document info + i18n + Workflow + Releases + Version History */}
+        <div className={previewOpen ? "space-y-4 lg:col-span-3" : "space-y-4 lg:col-span-4"}>
           <Card>
             <CardHeader>
               <CardTitle>Document metadata</CardTitle>
@@ -420,6 +646,170 @@ export function EntryEditorPage() {
             </CardContent>
           </Card>
 
+          {resolvedDocId && schema.i18nEnabled && (
+            <Card>
+              <CardHeader>
+                <div className="flex items-center gap-1.5">
+                  <Globe className="h-3.5 w-3.5 text-indigo-700" />
+                  <CardTitle>Internationalization</CardTitle>
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-2.5 text-xs">
+                <div className="flex flex-wrap gap-1.5">
+                  {(localesQuery.data ?? []).map((loc) => {
+                    const st = (docLocalesQuery.data ?? []).find((d) => d.locale === loc.code);
+                    const isCurrent = loc.code === activeLocale;
+                    return (
+                      <button
+                        key={loc.code}
+                        type="button"
+                        onClick={() => setActiveLocale(loc.code)}
+                        className={`inline-flex items-center gap-1 rounded border px-2 py-1 font-mono text-[11px] cursor-pointer ${
+                          isCurrent
+                            ? "border-indigo-600 bg-indigo-50 font-semibold text-indigo-900"
+                            : "border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
+                        }`}
+                      >
+                        <span>{loc.code}</span>
+                        <span
+                          className={`h-1.5 w-1.5 rounded-full ${
+                            st?.hasPublished
+                              ? "bg-emerald-600"
+                              : st?.hasDraft
+                                ? "bg-amber-500"
+                                : "bg-zinc-300"
+                          }`}
+                        />
+                      </button>
+                    );
+                  })}
+                </div>
+                {(docLocalesQuery.data ?? []).some((d) => d.locale !== activeLocale) && (
+                  <div className="flex items-center gap-1.5 pt-1">
+                    <div className="flex-1">
+                      <Select
+                        value={fillSourceLocale}
+                        onValueChange={setFillSourceLocale}
+                        options={[
+                          { value: "", label: "Fill from locale..." },
+                          ...(docLocalesQuery.data ?? [])
+                            .filter((d) => d.locale !== activeLocale)
+                            .map((d) => ({ value: d.locale, label: `Copy from ${d.locale}` })),
+                        ]}
+                      />
+                    </div>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      disabled={!fillSourceLocale || fillLocaleMut.isPending}
+                      onClick={() => fillLocaleMut.mutate(fillSourceLocale)}
+                    >
+                      Fill
+                    </Button>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
+          {resolvedDocId && (
+            <Card>
+              <CardHeader>
+                <div className="flex items-center gap-1.5">
+                  <GitPullRequest className="h-3.5 w-3.5 text-indigo-700" />
+                  <CardTitle>Review workflow</CardTitle>
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-2.5 text-xs">
+                <div>
+                  <label className="mb-1 block text-[11px] text-zinc-500">Stage</label>
+                  <Select
+                    value={workflowEntryQuery.data?.stageId ?? ""}
+                    onValueChange={(stageId) =>
+                      workflowMut.mutate({
+                        stageId,
+                        assigneeId: workflowEntryQuery.data?.assigneeId ?? null,
+                      })
+                    }
+                    options={(workflowStagesQuery.data ?? []).map((s) => ({
+                      value: s.id,
+                      label: s.requireForPublish ? `${s.name} (Publish Gate)` : s.name,
+                    }))}
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-[11px] text-zinc-500">Assignee</label>
+                  <Select
+                    value={workflowEntryQuery.data?.assigneeId ?? "__none__"}
+                    onValueChange={(val) => {
+                      const stageId =
+                        workflowEntryQuery.data?.stageId ??
+                        workflowStagesQuery.data?.[0]?.id;
+                      if (!stageId) return;
+                      workflowMut.mutate({
+                        stageId,
+                        assigneeId: val === "__none__" ? null : val,
+                      });
+                    }}
+                    options={[
+                      { value: "__none__", label: "Unassigned" },
+                      ...(adminUsersQuery.data ?? []).map((u) => ({
+                        value: u.id,
+                        label: `${u.firstname || u.email} (${u.email})`,
+                      })),
+                    ]}
+                  />
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {resolvedDocId && schema.draftAndPublish && (
+            <Card>
+              <CardHeader>
+                <div className="flex items-center gap-1.5">
+                  <Rocket className="h-3.5 w-3.5 text-indigo-700" />
+                  <CardTitle>Add to release</CardTitle>
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-2 text-xs">
+                {(releasesQuery.data ?? []).filter((r) => r.status !== "done").length === 0 ? (
+                  <p className="text-zinc-500">
+                    No pending releases.{" "}
+                    <Link to="/settings/releases" className="text-indigo-700 underline">
+                      Create a release
+                    </Link>
+                  </p>
+                ) : (
+                  <div className="flex items-center gap-1.5">
+                    <div className="flex-1">
+                      <Select
+                        value={selectedReleaseId}
+                        onValueChange={setSelectedReleaseId}
+                        options={[
+                          { value: "", label: "Select pending release..." },
+                          ...(releasesQuery.data ?? [])
+                            .filter((r) => r.status !== "done")
+                            .map((r) => ({ value: r.id, label: r.name })),
+                        ]}
+                      />
+                    </div>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      disabled={!selectedReleaseId || addToReleaseMut.isPending}
+                      onClick={() => addToReleaseMut.mutate(selectedReleaseId)}
+                    >
+                      Add
+                    </Button>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
           {resolvedDocId && (
             <Card>
               <CardHeader>
@@ -454,16 +844,27 @@ export function EntryEditorPage() {
                           {new Date(ver.createdAt).toLocaleString()}
                         </div>
                       </div>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="ghost"
-                        title="Restore this snapshot"
-                        disabled={restoreMut.isPending}
-                        onClick={() => restoreMut.mutate(ver.id)}
-                      >
-                        <RotateCcw className="h-3.5 w-3.5" />
-                      </Button>
+                      <div className="flex items-center gap-1">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          title="Inspect diff against current form"
+                          onClick={() => setDiffVersion(ver)}
+                        >
+                          <Diff className="h-3.5 w-3.5" />
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          title="Restore this snapshot"
+                          disabled={restoreMut.isPending}
+                          onClick={() => restoreMut.mutate(ver.id)}
+                        >
+                          <RotateCcw className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
                     </div>
                   ))
                 )}
@@ -472,6 +873,67 @@ export function EntryEditorPage() {
           )}
         </div>
       </div>
+
+      {/* Snapshot Diff Dialog */}
+      <Dialog open={Boolean(diffVersion)} onOpenChange={(o) => !o && setDiffVersion(null)}>
+        <DialogContent
+          title={diffVersion ? `Snapshot Diff · v${diffVersion.version} vs Current` : "Diff"}
+          className="max-w-2xl"
+        >
+          {diffVersion && (
+            <div className="space-y-3 text-xs">
+              <div className="max-h-96 divide-y divide-zinc-200 overflow-y-auto rounded border border-zinc-200">
+                {schema.fields
+                  .filter((f) => f.fieldType !== "relation" && f.fieldType !== "media")
+                  .map((f) => {
+                    const snapStr = JSON.stringify(diffVersion.data?.[f.name] ?? null);
+                    const curStr = JSON.stringify(formValues[f.name] ?? null);
+                    const changed = snapStr !== curStr;
+                    return (
+                      <div key={f.name} className="space-y-1 p-2.5">
+                        <div className="flex items-center justify-between">
+                          <span className="font-mono font-semibold text-zinc-800">{f.name}</span>
+                          <Badge tone={changed ? "amber" : "neutral"}>
+                            {changed ? "changed" : "unchanged"}
+                          </Badge>
+                        </div>
+                        {changed && (
+                          <div className="grid grid-cols-2 gap-2 pt-1 font-mono text-[11px]">
+                            <div className="rounded border border-amber-200 bg-amber-50 p-2 text-amber-950 break-all">
+                              <div className="mb-0.5 text-[10px] font-semibold uppercase text-amber-700">
+                                Snapshot v{diffVersion.version}
+                              </div>
+                              {snapStr}
+                            </div>
+                            <div className="rounded border border-emerald-200 bg-emerald-50 p-2 text-emerald-950 break-all">
+                              <div className="mb-0.5 text-[10px] font-semibold uppercase text-emerald-700">
+                                Current Editor
+                              </div>
+                              {curStr}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+              </div>
+              <div className="flex justify-end gap-2">
+                <Button size="sm" variant="secondary" onClick={() => setDiffVersion(null)}>
+                  Close
+                </Button>
+                <Button
+                  size="sm"
+                  disabled={restoreMut.isPending}
+                  onClick={() => restoreMut.mutate(diffVersion.id)}
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  Restore v{diffVersion.version}
+                </Button>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

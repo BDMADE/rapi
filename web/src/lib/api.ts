@@ -326,6 +326,92 @@ export interface MediaFolderDto {
   updatedAt: string;
 }
 
+export interface LocaleDto {
+  id: number;
+  code: string;
+  name: string;
+  isDefault: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DocumentLocaleStateDto {
+  locale: string;
+  hasDraft: boolean;
+  hasPublished: boolean;
+  updatedAt: string;
+}
+
+export interface PreviewConfigDto {
+  contentTypeUid: string;
+  urlTemplate: string;
+  isEnabled: boolean;
+  openMode: string;
+  updatedAt: string;
+}
+
+export interface ResolvedPreviewDto {
+  url: string;
+  openMode: string;
+  isBuiltin: boolean;
+}
+
+export interface ReleaseEntryDto {
+  id: number;
+  releaseId: string;
+  contentTypeUid: string;
+  documentId: string;
+  locale: string;
+  action: string;
+}
+
+export interface ReleaseDto {
+  id: string;
+  name: string;
+  scheduledAt: string | null;
+  timezone: string;
+  status: string;
+  releasedAt: string | null;
+  errorMessage: string | null;
+  entryCount: number;
+  entries: ReleaseEntryDto[];
+  createdBy: string | null;
+  createdAt: string;
+}
+
+export interface WorkflowStageDto {
+  id: string;
+  name: string;
+  color: string;
+  position: number;
+  allowedRoleIds: string[];
+  requireForPublish: boolean;
+}
+
+export interface WorkflowEntryDto {
+  documentId: string;
+  locale: string;
+  stageId: string;
+  stageName: string;
+  stageColor: string;
+  assigneeId: string | null;
+  assigneeEmail: string | null;
+  updatedAt: string;
+}
+
+export interface AuditLogDto {
+  id: string;
+  action: string;
+  actorType: string;
+  actorId: string | null;
+  targetUid: string | null;
+  targetId: string | null;
+  ipAddress: string | null;
+  userAgent: string | null;
+  payload: Record<string, unknown>;
+  createdAt: string;
+}
+
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 
 // Deduplicates concurrent 401 refresh attempts so single-use refresh token rotation
@@ -856,4 +942,227 @@ export const api = {
     requestJson<ApiResponse<{ deleted: number }>>(`/admin/media/folders/${id}`, {
       method: "DELETE",
     }),
+
+  // Phase 5 — Internationalization (i18n)
+  listLocales: async () =>
+    (await requestJson<ApiResponse<LocaleDto[]>>("/admin/i18n/locales")).data,
+
+  createLocale: async (payload: { code: string; name: string; isDefault: boolean }) =>
+    (
+      await requestJson<ApiResponse<LocaleDto>>("/admin/i18n/locales", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      })
+    ).data,
+
+  updateLocale: async (id: number, payload: { name?: string; isDefault?: boolean }) =>
+    (
+      await requestJson<ApiResponse<LocaleDto>>(`/admin/i18n/locales/${id}`, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      })
+    ).data,
+
+  deleteLocale: async (id: number) =>
+    requestJson<ApiResponse<LocaleDto>>(`/admin/i18n/locales/${id}`, {
+      method: "DELETE",
+    }),
+
+  listDocumentLocales: async (uid: string, documentId: string) =>
+    (
+      await requestJson<ApiResponse<DocumentLocaleStateDto[]>>(
+        `/admin/content-manager/${encodeURIComponent(uid)}/${encodeURIComponent(documentId)}/locales`,
+      )
+    ).data,
+
+  fillFromLocale: async (
+    uid: string,
+    documentId: string,
+    sourceLocale: string,
+    targetLocale: string,
+  ) =>
+    (
+      await requestJson<ApiResponse<ContentDocument>>(
+        `/admin/content-manager/${encodeURIComponent(uid)}/${encodeURIComponent(documentId)}/fill-from-locale`,
+        {
+          method: "POST",
+          body: JSON.stringify({ sourceLocale, targetLocale }),
+        },
+      )
+    ).data,
+
+  // Phase 5 — Preview & Live SSE
+  listPreviewConfigs: async () =>
+    (await requestJson<ApiResponse<PreviewConfigDto[]>>("/admin/preview/configs")).data,
+
+  upsertPreviewConfig: async (
+    uid: string,
+    payload: { urlTemplate: string; isEnabled: boolean; openMode: "split" | "tab" },
+  ) =>
+    (
+      await requestJson<ApiResponse<PreviewConfigDto>>(
+        `/admin/preview/configs/${encodeURIComponent(uid)}`,
+        {
+          method: "PUT",
+          body: JSON.stringify(payload),
+        },
+      )
+    ).data,
+
+  deletePreviewConfig: async (uid: string) =>
+    requestJson<ApiResponse<{ deleted: string }>>(
+      `/admin/preview/configs/${encodeURIComponent(uid)}`,
+      { method: "DELETE" },
+    ),
+
+  resolvePreviewUrl: async (uid: string, documentId: string, locale: string, status = "draft") =>
+    (
+      await requestJson<ApiResponse<ResolvedPreviewDto>>(
+        `/admin/preview/resolve/${encodeURIComponent(uid)}/${encodeURIComponent(documentId)}?locale=${encodeURIComponent(locale)}&status=${encodeURIComponent(status)}`,
+      )
+    ).data,
+
+  getPreviewSseUrl: (token: string) =>
+    `${API_BASE}/api/preview/events?token=${encodeURIComponent(token)}`,
+
+  // Phase 5 — Releases
+  listReleases: async () =>
+    (await requestJson<ApiResponse<ReleaseDto[]>>("/admin/releases")).data,
+
+  createRelease: async (payload: {
+    name: string;
+    scheduledAt?: string | null;
+    timezone?: string;
+  }) =>
+    (
+      await requestJson<ApiResponse<ReleaseDto>>("/admin/releases", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      })
+    ).data,
+
+  updateRelease: async (
+    id: string,
+    payload: { name?: string; scheduledAt?: string | null; timezone?: string },
+  ) =>
+    (
+      await requestJson<ApiResponse<ReleaseDto>>(`/admin/releases/${id}`, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      })
+    ).data,
+
+  deleteRelease: async (id: string) =>
+    requestJson<ApiResponse<{ deleted: string }>>(`/admin/releases/${id}`, {
+      method: "DELETE",
+    }),
+
+  addReleaseEntry: async (
+    releaseId: string,
+    payload: {
+      contentTypeUid: string;
+      documentId: string;
+      locale: string;
+      action: "publish" | "unpublish";
+    },
+  ) =>
+    (
+      await requestJson<ApiResponse<ReleaseDto>>(`/admin/releases/${releaseId}/entries`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      })
+    ).data,
+
+  removeReleaseEntry: async (releaseId: string, entryId: number) =>
+    (
+      await requestJson<ApiResponse<ReleaseDto>>(
+        `/admin/releases/${releaseId}/entries/${entryId}`,
+        { method: "DELETE" },
+      )
+    ).data,
+
+  publishRelease: async (releaseId: string) =>
+    (
+      await requestJson<ApiResponse<ReleaseDto>>(`/admin/releases/${releaseId}/publish`, {
+        method: "POST",
+      })
+    ).data,
+
+  // Phase 5 — Review Workflows
+  listWorkflowStages: async () =>
+    (await requestJson<ApiResponse<WorkflowStageDto[]>>("/admin/workflows/stages")).data,
+
+  createWorkflowStage: async (payload: {
+    name: string;
+    color: string;
+    allowedRoleIds: string[];
+    requireForPublish: boolean;
+  }) =>
+    (
+      await requestJson<ApiResponse<WorkflowStageDto>>("/admin/workflows/stages", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      })
+    ).data,
+
+  updateWorkflowStage: async (
+    id: string,
+    payload: {
+      name?: string;
+      color?: string;
+      position?: number;
+      allowedRoleIds?: string[];
+      requireForPublish?: boolean;
+    },
+  ) =>
+    (
+      await requestJson<ApiResponse<WorkflowStageDto>>(`/admin/workflows/stages/${id}`, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      })
+    ).data,
+
+  deleteWorkflowStage: async (id: string) =>
+    requestJson<ApiResponse<{ deleted: string }>>(`/admin/workflows/stages/${id}`, {
+      method: "DELETE",
+    }),
+
+  getWorkflowEntry: async (documentId: string, locale: string) =>
+    (
+      await requestJson<ApiResponse<WorkflowEntryDto>>(
+        `/admin/workflows/entries/${encodeURIComponent(documentId)}?locale=${encodeURIComponent(locale)}`,
+      )
+    ).data,
+
+  updateWorkflowEntry: async (
+    documentId: string,
+    payload: { locale: string; stageId: string; assigneeId?: string | null },
+  ) =>
+    (
+      await requestJson<ApiResponse<WorkflowEntryDto>>(
+        `/admin/workflows/entries/${encodeURIComponent(documentId)}`,
+        {
+          method: "PUT",
+          body: JSON.stringify(payload),
+        },
+      )
+    ).data,
+
+  // Phase 5 — Audit Logs
+  listAuditLogs: async (params: {
+    action?: string;
+    actorId?: string;
+    targetUid?: string;
+    page?: number;
+    pageSize?: number;
+  } = {}) => {
+    const qs = new URLSearchParams();
+    if (params.action) qs.set("action", params.action);
+    if (params.actorId) qs.set("actorId", params.actorId);
+    if (params.targetUid) qs.set("targetUid", params.targetUid);
+    if (params.page) qs.set("page", String(params.page));
+    if (params.pageSize) qs.set("pageSize", String(params.pageSize));
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return requestJson<ApiResponse<AuditLogDto[]>>(`/admin/audit-logs${suffix}`);
+  },
 };

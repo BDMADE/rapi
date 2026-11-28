@@ -10,6 +10,13 @@ import { ContentTypeBuilderPage } from "@/features/content-type-builder/builder-
 import { OverviewPage } from "@/features/dashboard/overview-page";
 import { MediaLibraryPage } from "@/features/media/media-library-page";
 import { ModulePlaceholderPage } from "@/features/placeholders/workspace-views";
+import {
+  AuditLogsPage,
+  LocalesPage,
+  PreviewSettingsPage,
+  ReleasesPage,
+  WorkflowsPage,
+} from "@/features/settings/governance-pages";
 import { TokensPage } from "@/features/settings/tokens-page";
 import { UsersRolesPage } from "@/features/users-roles/users-roles-page";
 
@@ -82,6 +89,26 @@ export const router = createBrowserRouter([
       {
         path: "settings/admin-tokens",
         element: <TokensPage defaultKind="admin" />,
+      },
+      {
+        path: "settings/i18n",
+        element: <LocalesPage />,
+      },
+      {
+        path: "settings/preview",
+        element: <PreviewSettingsPage />,
+      },
+      {
+        path: "settings/releases",
+        element: <ReleasesPage />,
+      },
+      {
+        path: "settings/workflows",
+        element: <WorkflowsPage />,
+      },
+      {
+        path: "settings/audit-logs",
+        element: <AuditLogsPage />,
       },
       {
         path: "settings/:section",
