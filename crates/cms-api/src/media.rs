@@ -74,7 +74,7 @@ pub fn media_routes() -> Router<ServiceContainer> {
 
 fn actor_id(actor: &Actor) -> Option<String> {
     match actor {
-        Actor::AdminUser { user_id, .. } => Some(user_id.clone()),
+        Actor::AdminUser { user_id, .. } | Actor::EndUser { user_id, .. } => Some(user_id.clone()),
         Actor::AdminToken { token_id, .. } | Actor::ApiToken { token_id, .. } => {
             Some(token_id.clone())
         }
@@ -174,6 +174,14 @@ async fn parse_and_store_multipart(
                 actor.clone(),
             )
             .await?;
+        services
+            .integrations
+            .emit_webhook_event(
+                "media.create",
+                Some("plugin::upload.file"),
+                serde_json::to_value(&dto).unwrap_or_default(),
+            )
+            .await;
         uploaded.push(dto);
     }
     Ok(uploaded)

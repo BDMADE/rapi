@@ -46,6 +46,27 @@ impl AuthRepository {
             .map_err(|e| ApiError::Internal(format!("count admin_users failed: {e}")))
     }
 
+    pub async fn find_end_user_jwt_context(
+        &self,
+        user_id: &str,
+    ) -> ApiResult<Option<(String, String, bool)>> {
+        let row = sqlx::query(
+            "SELECT email, role_id, blocked FROM end_users WHERE id = ? LIMIT 1",
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pools.reader)
+        .await
+        .map_err(|e| ApiError::Internal(format!("find_end_user_jwt_context failed: {e}")))?;
+
+        Ok(row.map(|r| {
+            (
+                r.get::<String, _>("email"),
+                r.get::<String, _>("role_id"),
+                r.get::<i64, _>("blocked") != 0,
+            )
+        }))
+    }
+
     pub async fn count_active_super_admins(&self) -> ApiResult<i64> {
         sqlx::query_scalar(
             "SELECT COUNT(*) FROM admin_users WHERE is_super_admin = 1 AND is_active = 1",

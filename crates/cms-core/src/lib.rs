@@ -4,6 +4,7 @@ pub mod content;
 pub mod error;
 pub mod governance;
 pub mod id;
+pub mod integrations;
 pub mod media;
 pub mod models;
 pub mod response;
@@ -22,6 +23,11 @@ pub use governance::{
     validate_locale_code, validate_preview_url_template, AuditLogDto, AuditLogFilter,
     DocumentLocaleStateDto, LocaleDto, PreviewConfigDto, ReleaseDto, ReleaseEntryDto,
     ResolvedPreviewDto, WorkflowEntryDto, WorkflowStageDto,
+};
+pub use integrations::{
+    sanitize_csv_cell, validate_webhook_url, DataTransferSummaryDto, EmailOutboxDto,
+    EmailSettingsStatusDto, EmailTemplateDto, EndUserAuthResponse, EndUserDto, UserRoleDto,
+    WebhookDeliveryDto, WebhookDto, SUPPORTED_WEBHOOK_EVENTS,
 };
 pub use media::{
     sanitize_filename, validate_storage_key, LocalDiskProvider, MediaFileDto, MediaFolderDto,

@@ -82,7 +82,7 @@ pub fn content_api_routes() -> Router<ServiceContainer> {
 
 fn actor_id(actor: &Actor) -> Option<&str> {
     match actor {
-        Actor::AdminUser { user_id, .. } => Some(user_id.as_str()),
+        Actor::AdminUser { user_id, .. } | Actor::EndUser { user_id, .. } => Some(user_id.as_str()),
         Actor::AdminToken { token_id, .. } | Actor::ApiToken { token_id, .. } => {
             Some(token_id.as_str())
         }
@@ -223,6 +223,10 @@ async fn rest_create_handler(
             true,
         )
         .await?;
+    services
+        .integrations
+        .emit_webhook_event("entry.create", Some(&schema.uid), created.clone())
+        .await;
     Ok(Json(ApiResponse::new(created)))
 }
 
@@ -261,6 +265,10 @@ async fn rest_update_handler(
             true,
         )
         .await?;
+    services
+        .integrations
+        .emit_webhook_event("entry.update", Some(&schema.uid), updated.clone())
+        .await;
     Ok(Json(ApiResponse::new(updated)))
 }
 
@@ -278,6 +286,14 @@ async fn rest_delete_handler(
         .content
         .delete_entry(&schema, &document_id, params.locale.as_deref())
         .await?;
+    services
+        .integrations
+        .emit_webhook_event(
+            "entry.delete",
+            Some(&schema.uid),
+            serde_json::json!({ "documentId": document_id }),
+        )
+        .await;
 
     Ok(Json(ApiResponse::new(serde_json::json!({
         "documentId": document_id
@@ -426,6 +442,10 @@ async fn admin_create_entry_handler(
             false,
         )
         .await?;
+    services
+        .integrations
+        .emit_webhook_event("entry.create", Some(&schema.uid), doc.clone())
+        .await;
     Ok(Json(ApiResponse::new(doc)))
 }
 
@@ -569,6 +589,10 @@ async fn admin_update_entry_handler(
             false,
         )
         .await?;
+    services
+        .integrations
+        .emit_webhook_event("entry.update", Some(&schema.uid), doc.clone())
+        .await;
     Ok(Json(ApiResponse::new(doc)))
 }
 
@@ -589,6 +613,14 @@ async fn admin_delete_entry_handler(
         .content
         .delete_entry(&schema, &document_id, params.locale.as_deref())
         .await?;
+    services
+        .integrations
+        .emit_webhook_event(
+            "entry.delete",
+            Some(&schema.uid),
+            serde_json::json!({ "documentId": document_id }),
+        )
+        .await;
     Ok(Json(ApiResponse::new(
         serde_json::json!({ "deleted": document_id }),
     )))
@@ -618,6 +650,10 @@ async fn admin_publish_handler(
         .content
         .publish_entry(&uid, &document_id, &locale, actor_id(&actor))
         .await?;
+    services
+        .integrations
+        .emit_webhook_event("entry.publish", Some(&uid), doc.clone())
+        .await;
     Ok(Json(ApiResponse::new(doc)))
 }
 

@@ -412,6 +412,91 @@ export interface AuditLogDto {
   createdAt: string;
 }
 
+export interface UserRoleDto {
+  id: string;
+  roleType: string;
+  name: string;
+  description: string;
+  userCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EndUserDto {
+  id: string;
+  documentId: string;
+  username: string;
+  email: string;
+  provider: string;
+  confirmed: boolean;
+  blocked: boolean;
+  roleId: string;
+  roleName: string;
+  roleType: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WebhookDto {
+  id: string;
+  name: string;
+  url: string;
+  headers: Record<string, string>;
+  events: string[];
+  hasSecret: boolean;
+  isEnabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WebhookDeliveryDto {
+  id: string;
+  webhookId: string;
+  event: string;
+  statusCode: number | null;
+  success: boolean;
+  attempts: number;
+  request: Record<string, unknown>;
+  responseBody: string | null;
+  durationMs: number | null;
+  createdAt: string;
+}
+
+export interface EmailTemplateDto {
+  id: string;
+  code: string;
+  subject: string;
+  htmlBody: string;
+  textBody: string;
+  updatedAt: string;
+}
+
+export interface EmailOutboxDto {
+  id: string;
+  toAddress: string;
+  fromAddress: string;
+  subject: string;
+  transport: string;
+  status: string;
+  errorMessage: string | null;
+  createdAt: string;
+}
+
+export interface EmailSettingsStatusDto {
+  provider: string;
+  smtpConfigured: boolean;
+  smtpHost: string | null;
+  smtpPort: number;
+  fromAddress: string;
+}
+
+export interface DataTransferSummaryDto {
+  schemasImported: number;
+  localesImported: number;
+  documentsImported: number;
+  relationsImported: number;
+}
+
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 
 // Deduplicates concurrent 401 refresh attempts so single-use refresh token rotation
@@ -1165,4 +1250,196 @@ export const api = {
     const suffix = qs.toString() ? `?${qs.toString()}` : "";
     return requestJson<ApiResponse<AuditLogDto[]>>(`/admin/audit-logs${suffix}`);
   },
+
+  // Phase 6 — End-Users & User Roles
+  listEndUsers: async () =>
+    (await requestJson<ApiResponse<EndUserDto[]>>("/admin/end-users")).data,
+
+  createEndUser: async (payload: {
+    username: string;
+    email: string;
+    password: string;
+    roleId?: string;
+    confirmed?: boolean;
+    blocked?: boolean;
+  }) =>
+    (
+      await requestJson<ApiResponse<EndUserDto>>("/admin/end-users", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      })
+    ).data,
+
+  updateEndUser: async (
+    id: string,
+    payload: {
+      blocked?: boolean;
+      confirmed?: boolean;
+      roleId?: string;
+      password?: string;
+    },
+  ) =>
+    (
+      await requestJson<ApiResponse<EndUserDto>>(`/admin/end-users/${id}`, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      })
+    ).data,
+
+  deleteEndUser: async (id: string) =>
+    requestJson<ApiResponse<{ deleted: string }>>(`/admin/end-users/${id}`, {
+      method: "DELETE",
+    }),
+
+  listUserRoles: async () =>
+    (await requestJson<ApiResponse<UserRoleDto[]>>("/admin/user-roles")).data,
+
+  getUserRolePermissions: async (roleId: string) =>
+    (
+      await requestJson<ApiResponse<PermissionRule[]>>(
+        `/admin/user-roles/${encodeURIComponent(roleId)}/permissions`,
+      )
+    ).data,
+
+  updateUserRolePermissions: async (roleId: string, permissions: PermissionRule[]) =>
+    (
+      await requestJson<ApiResponse<PermissionRule[]>>(
+        `/admin/user-roles/${encodeURIComponent(roleId)}/permissions`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ permissions }),
+        },
+      )
+    ).data,
+
+  // Phase 6 — Webhooks
+  listWebhooks: async () =>
+    (await requestJson<ApiResponse<WebhookDto[]>>("/admin/webhooks")).data,
+
+  createWebhook: async (payload: {
+    name: string;
+    url: string;
+    headers?: Record<string, string>;
+    events: string[];
+    secret?: string;
+    isEnabled?: boolean;
+  }) =>
+    (
+      await requestJson<ApiResponse<WebhookDto>>("/admin/webhooks", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      })
+    ).data,
+
+  updateWebhook: async (
+    id: string,
+    payload: {
+      name?: string;
+      url?: string;
+      headers?: Record<string, string>;
+      events?: string[];
+      secret?: string | null;
+      isEnabled?: boolean;
+    },
+  ) =>
+    (
+      await requestJson<ApiResponse<WebhookDto>>(`/admin/webhooks/${id}`, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      })
+    ).data,
+
+  deleteWebhook: async (id: string) =>
+    requestJson<ApiResponse<{ deleted: string }>>(`/admin/webhooks/${id}`, {
+      method: "DELETE",
+    }),
+
+  triggerWebhook: async (id: string) =>
+    (
+      await requestJson<ApiResponse<WebhookDeliveryDto>>(`/admin/webhooks/${id}/trigger`, {
+        method: "POST",
+      })
+    ).data,
+
+  listWebhookDeliveries: async (id: string) =>
+    (await requestJson<ApiResponse<WebhookDeliveryDto[]>>(`/admin/webhooks/${id}/deliveries`))
+      .data,
+
+  // Phase 6 — Email Plugin
+  getEmailSettings: async () =>
+    (await requestJson<ApiResponse<EmailSettingsStatusDto>>("/admin/email/settings")).data,
+
+  listEmailTemplates: async () =>
+    (await requestJson<ApiResponse<EmailTemplateDto[]>>("/admin/email/templates")).data,
+
+  upsertEmailTemplate: async (
+    code: string,
+    payload: { subject: string; htmlBody: string; textBody: string },
+  ) =>
+    (
+      await requestJson<ApiResponse<EmailTemplateDto>>(
+        `/admin/email/templates/${encodeURIComponent(code)}`,
+        {
+          method: "PUT",
+          body: JSON.stringify(payload),
+        },
+      )
+    ).data,
+
+  sendTestEmail: async (to: string, subject?: string) =>
+    (
+      await requestJson<ApiResponse<EmailOutboxDto>>("/admin/email/test", {
+        method: "POST",
+        body: JSON.stringify({ to, subject }),
+      })
+    ).data,
+
+  listEmailOutbox: async () =>
+    (await requestJson<ApiResponse<EmailOutboxDto[]>>("/admin/email/outbox")).data,
+
+  // Phase 6 — Data Transfer
+  exportJsonBundle: async () =>
+    (await requestJson<ApiResponse<Record<string, unknown>>>("/admin/data-transfer/export?format=json"))
+      .data,
+
+  exportCsvText: async (uid: string, locale?: string) => {
+    const token = useAuthStore.getState().token;
+    const qs = new URLSearchParams({ format: "csv", uid });
+    if (locale) qs.set("locale", locale);
+    const res = await fetch(`${API_BASE}/admin/data-transfer/export?${qs.toString()}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) throw new Error(`CSV export failed (HTTP ${res.status})`);
+    return res.text();
+  },
+
+  importJsonBundle: async (bundle: unknown) =>
+    (
+      await requestJson<ApiResponse<DataTransferSummaryDto>>("/admin/data-transfer/import/json", {
+        method: "POST",
+        body: JSON.stringify(bundle),
+      })
+    ).data,
+
+  importCsv: async (uid: string, csvText: string, locale?: string) =>
+    (
+      await requestJson<ApiResponse<DataTransferSummaryDto>>(
+        `/admin/data-transfer/import/csv/${encodeURIComponent(uid)}`,
+        {
+          method: "POST",
+          body: JSON.stringify({ csv: csvText, locale }),
+        },
+      )
+    ).data,
+
+  importStrapiV5Archive: async (archive: unknown) =>
+    (
+      await requestJson<ApiResponse<DataTransferSummaryDto>>(
+        "/admin/data-transfer/import/strapi-v5",
+        {
+          method: "POST",
+          body: JSON.stringify(archive),
+        },
+      )
+    ).data,
 };

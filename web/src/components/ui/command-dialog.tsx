@@ -32,6 +32,9 @@ const COMMAND_ITEMS = [
   { label: "Live Preview Settings", path: "/settings/preview", group: "Settings", icon: Eye },
   { label: "API Tokens", path: "/settings/api-tokens", group: "Settings", icon: KeyRound },
   { label: "Webhooks", path: "/settings/webhooks", group: "Settings", icon: Webhook },
+  { label: "Email Delivery & Templates", path: "/settings/email", group: "Settings", icon: Globe },
+  { label: "Data Transfer & Strapi v5 Import", path: "/settings/data-transfer", group: "Settings", icon: Database },
+  { label: "GraphQL Explorer (/graphql)", path: "/graphql", external: true, group: "API", icon: FileJson },
   { label: "First-admin onboarding", path: "/onboarding", group: "Auth", icon: ShieldCheck },
   { label: "OpenAPI 3.1 JSON specification", path: "/openapi.json", external: true, group: "API", icon: FileJson },
 ];

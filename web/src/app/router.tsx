@@ -17,6 +17,11 @@ import {
   ReleasesPage,
   WorkflowsPage,
 } from "@/features/settings/governance-pages";
+import {
+  DataTransferPage,
+  EmailSettingsPage,
+  WebhooksPage,
+} from "@/features/settings/integrations-pages";
 import { TokensPage } from "@/features/settings/tokens-page";
 import { UsersRolesPage } from "@/features/users-roles/users-roles-page";
 
@@ -109,6 +114,18 @@ export const router = createBrowserRouter([
       {
         path: "settings/audit-logs",
         element: <AuditLogsPage />,
+      },
+      {
+        path: "settings/webhooks",
+        element: <WebhooksPage />,
+      },
+      {
+        path: "settings/email",
+        element: <EmailSettingsPage />,
+      },
+      {
+        path: "settings/data-transfer",
+        element: <DataTransferPage />,
       },
       {
         path: "settings/:section",

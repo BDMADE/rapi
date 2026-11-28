@@ -129,7 +129,7 @@ pub fn governance_routes() -> Router<ServiceContainer> {
 
 fn actor_id_str(actor: &Actor) -> Option<&str> {
     match actor {
-        Actor::AdminUser { user_id, .. } => Some(user_id.as_str()),
+        Actor::AdminUser { user_id, .. } | Actor::EndUser { user_id, .. } => Some(user_id.as_str()),
         Actor::AdminToken { token_id, .. } | Actor::ApiToken { token_id, .. } => {
             Some(token_id.as_str())
         }
@@ -566,6 +566,14 @@ async fn admin_publish_release_handler(
         .governance
         .execute_release(&id, actor_id_str(&actor))
         .await?;
+    services
+        .integrations
+        .emit_webhook_event(
+            "release.publish",
+            None,
+            serde_json::to_value(&executed).unwrap_or_default(),
+        )
+        .await;
     Ok(Json(ApiResponse::new(executed)))
 }
 
