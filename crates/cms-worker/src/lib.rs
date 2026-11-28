@@ -78,7 +78,11 @@ impl WorkerRunner {
 
     async fn handle_job(&self, job: &JobMessage) -> ApiResult<()> {
         debug!(job_id = %job.id, queue = %job.queue, "Dispatching background job");
-        // Phase 4–6 workers plug into specific queue handlers here.
+        if job.queue == "rapi:jobs:media" {
+            if let Some(file_id) = job.payload.get("fileId").and_then(|v| v.as_i64()) {
+                self.services.media.process_responsive_formats(file_id).await?;
+            }
+        }
         Ok(())
     }
 }
