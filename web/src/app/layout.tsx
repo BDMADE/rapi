@@ -153,6 +153,8 @@ export function AppLayout() {
 
   const isOnline = readinessQuery.isSuccess && readinessQuery.data.status === "ready";
   const isHomeRoute = location.pathname === "/";
+  const isContentManagerRoute = location.pathname.startsWith("/content-manager");
+  const hideTopHeader = isHomeRoute || isContentManagerRoute;
   const initials = getInitials(user?.firstname, user?.lastname, user?.email);
 
   return (
@@ -310,8 +312,8 @@ export function AppLayout() {
 
       {/* Main workspace column */}
       <div className="flex min-w-0 flex-1 flex-col">
-        {/* Show slim workspace utility header on sub-pages; keep Home canvas uninterrupted like Strapi v5 */}
-        {!isHomeRoute && (
+        {/* Show slim workspace utility header on sub-pages; keep Home and Content Manager canvases uninterrupted like Strapi v5 */}
+        {!hideTopHeader && (
           <header className="sticky top-0 z-20 flex h-12 items-center justify-between border-b border-[#eaeaef] bg-white/95 px-6 backdrop-blur-xs">
             <div className="flex items-center gap-2 text-xs text-[#666687]">
               <Link to="/" className="font-medium text-[#32324d] hover:text-[#4945ff]">
@@ -389,8 +391,25 @@ export function AppLayout() {
           </header>
         )}
 
-        <main className={cn("flex-1", isHomeRoute ? "px-8 py-9 lg:px-12" : "p-6")}>
-          <div className={cn("mx-auto", isHomeRoute ? "max-w-[1360px]" : "max-w-6xl")}>
+        <main
+          className={cn(
+            "flex-1",
+            isContentManagerRoute
+              ? "p-0"
+              : isHomeRoute
+                ? "px-8 py-9 lg:px-12"
+                : "p-6",
+          )}
+        >
+          <div
+            className={cn(
+              isContentManagerRoute
+                ? "w-full"
+                : isHomeRoute
+                  ? "mx-auto max-w-[1360px]"
+                  : "mx-auto max-w-6xl",
+            )}
+          >
             <Outlet />
           </div>
         </main>

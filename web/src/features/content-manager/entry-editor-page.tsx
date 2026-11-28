@@ -444,85 +444,95 @@ export function EntryEditorPage() {
   const isPublished = pubState === "published" || pubState === "modified";
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-6">
       {/* Header bar */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          {!isSingle && (
-            <Button size="sm" variant="secondary" asChild>
-              <Link to={`/content-manager/${encodeURIComponent(schema.uid)}`}>
-                <ArrowLeft className="h-3.5 w-3.5" />
-                Back
-              </Link>
-            </Button>
-          )}
+      <div>
+        {!isSingle && (
+          <Link
+            to={`/content-manager/${encodeURIComponent(schema.uid)}`}
+            className="mb-2.5 inline-flex items-center gap-1.5 text-[13px] font-medium text-[#4945ff] transition-colors hover:text-[#271fe0]"
+          >
+            <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2.2} />
+            <span>Back</span>
+          </Link>
+        )}
+        <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
-            <div className="flex items-center gap-2">
-              <h1 className="text-lg font-semibold tracking-tight text-zinc-900">
-                {isCreate ? `Create ${schema.displayName}` : schema.displayName}
+            <div className="flex items-center gap-2.5">
+              <h1 className="text-[28px] leading-[1.22] font-bold tracking-[-0.02em] text-[#32324d]">
+                {isCreate ? `Create an entry` : schema.displayName}
               </h1>
               <Badge tone="mono">{activeLocale}</Badge>
-              {!isCreate && (
-                <Badge
-                  tone={
+              {!isCreate && schema.draftAndPublish && (
+                <span
+                  className={
                     pubState === "published"
-                      ? "emerald"
+                      ? "inline-flex items-center rounded-[4px] border border-[#c6f0c2] bg-[#eafbe7] px-2.5 py-0.5 text-xs font-semibold text-[#2f6846]"
                       : pubState === "modified"
-                        ? "amber"
-                        : "neutral"
+                        ? "inline-flex items-center rounded-[4px] border border-[#f5c0b8] bg-[#fdf4dc] px-2.5 py-0.5 text-xs font-semibold text-[#be5d01]"
+                        : "inline-flex items-center rounded-[4px] border border-[#bae0ff] bg-[#eaf5ff] px-2.5 py-0.5 text-xs font-semibold text-[#0c75af]"
                   }
                 >
-                  {pubState}
-                </Badge>
+                  {pubState === "published"
+                    ? "Published"
+                    : pubState === "modified"
+                      ? "Modified"
+                      : "Draft"}
+                </span>
               )}
             </div>
+            <p className="mt-1 text-[13px] text-[#666687]">API ID : {schema.singularName}</p>
           </div>
-        </div>
 
-        <div className="flex items-center gap-2">
-          {resolvedDocId && entryQuery.data && (
-            <Button
-              size="sm"
-              variant={previewOpen ? "primary" : "secondary"}
-              onClick={handleTogglePreview}
-            >
-              <Eye className="h-3.5 w-3.5" />
-              {previewOpen ? "Close preview" : "Live preview"}
-            </Button>
-          )}
-          <Button
-            size="sm"
-            variant={schema.draftAndPublish ? "secondary" : "primary"}
-            onClick={() => saveMut.mutate()}
-            disabled={saveMut.isPending}
-          >
-            <Save className="h-3.5 w-3.5" />
-            {saveMut.isPending ? "Saving..." : "Save changes"}
-          </Button>
-
-          {schema.draftAndPublish && resolvedDocId && (
-            <>
+          <div className="flex items-center gap-2">
+            {resolvedDocId && entryQuery.data && (
               <Button
                 size="sm"
-                onClick={() => publishMut.mutate()}
-                disabled={publishMut.isPending}
+                variant={previewOpen ? "primary" : "secondary"}
+                onClick={handleTogglePreview}
               >
-                <CheckCircle2 className="h-3.5 w-3.5" />
-                Publish
+                <Eye className="h-3.5 w-3.5" />
+                {previewOpen ? "Close preview" : "Live preview"}
               </Button>
-              {isPublished && (
+            )}
+            <Button
+              size="sm"
+              variant={schema.draftAndPublish ? "secondary" : "primary"}
+              onClick={() => saveMut.mutate()}
+              disabled={saveMut.isPending}
+              className={
+                !schema.draftAndPublish ? "border-[#4945ff] bg-[#4945ff] hover:bg-[#271fe0]" : ""
+              }
+            >
+              <Save className="h-3.5 w-3.5" />
+              {saveMut.isPending ? "Saving..." : "Save"}
+            </Button>
+
+            {schema.draftAndPublish && resolvedDocId && (
+              <>
                 <Button
                   size="sm"
-                  variant="secondary"
-                  onClick={() => unpublishMut.mutate()}
-                  disabled={unpublishMut.isPending}
+                  onClick={() => publishMut.mutate()}
+                  disabled={publishMut.isPending}
+                  className="border-[#4945ff] bg-[#4945ff] hover:bg-[#271fe0]"
                 >
-                  <XCircle className="h-3.5 w-3.5 text-amber-600" />
-                  Unpublish
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                  Publish
                 </Button>
-              )}
-            </>
-          )}
+                {isPublished && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => unpublishMut.mutate()}
+                    disabled={unpublishMut.isPending}
+                  >
+                    <XCircle className="h-3.5 w-3.5 text-amber-600" />
+                    Unpublish
+                  </Button>
+                )}
+              </>
+            )}
+          </div>
         </div>
       </div>
 

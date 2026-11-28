@@ -4,6 +4,7 @@ import { AppLayout } from "@/app/layout";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ForgotPasswordPage, LoginPage, OnboardingPage } from "@/features/auth/auth-pages";
+import { ContentManagerLayout } from "@/features/content-manager/content-manager-layout";
 import { ContentManagerPage } from "@/features/content-manager/content-manager-page";
 import { EntryEditorPage } from "@/features/content-manager/entry-editor-page";
 import { ContentTypeBuilderPage } from "@/features/content-type-builder/builder-page";
@@ -51,15 +52,21 @@ export const router = createBrowserRouter([
       { index: true, element: <OverviewPage /> },
       {
         path: "content-manager",
-        element: <ContentManagerPage />,
-      },
-      {
-        path: "content-manager/:uid",
-        element: <ContentManagerPage />,
-      },
-      {
-        path: "content-manager/:uid/:documentId",
-        element: <EntryEditorPage />,
+        element: <ContentManagerLayout />,
+        children: [
+          {
+            index: true,
+            element: <ContentManagerPage />,
+          },
+          {
+            path: ":uid",
+            element: <ContentManagerPage />,
+          },
+          {
+            path: ":uid/:documentId",
+            element: <EntryEditorPage />,
+          },
+        ],
       },
       {
         path: "content-type-builder",
