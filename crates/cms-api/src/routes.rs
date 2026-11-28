@@ -1,6 +1,7 @@
 use crate::auth::{admin_auth_routes, enforce_permission, RequireAdmin};
 use crate::content::content_api_routes;
 use crate::error::HttpApiError;
+use crate::extensibility::extensibility_routes;
 use crate::governance::{audit_log_middleware, governance_routes};
 use crate::graphql::{graphql_routes, DynamicGraphqlEngine};
 use crate::integrations::integrations_routes;
@@ -55,6 +56,7 @@ pub fn build_router(services: ServiceContainer) -> Router {
         .merge(media_routes())
         .merge(governance_routes())
         .merge(integrations_routes())
+        .merge(extensibility_routes())
         .merge(graphql_routes(gql_engine))
         .merge(content_api_routes());
 
@@ -3316,5 +3318,911 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(bad_csv.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn phase7_plugins_wasm_custom_fields_mcp_sso_and_ai() {
+        let app = test_router().await;
+
+        // 0. Register initial Super Admin
+        let reg = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/register-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "email": "admin@rapi.local",
+                            "password": "AdminPassword123!",
+                            "firstname": "Ada",
+                            "lastname": "Lovelace"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reg.status(), StatusCode::OK);
+        let reg_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(reg.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let jwt = reg_json["data"]["token"].as_str().unwrap().to_string();
+
+        // 1. Custom Fields Registry + Schema with Custom Field
+        let cf_list = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/custom-fields")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cf_list.status(), StatusCode::OK);
+        let cf_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(cf_list.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert!(cf_json["data"].as_array().unwrap().len() >= 4);
+
+        let cf_create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/custom-fields")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "uid": "editorial::accent-swatch",
+                            "name": "Accent Swatch",
+                            "underlyingType": "string",
+                            "options": { "widget": "color" }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cf_create.status(), StatusCode::OK);
+
+        let ct_create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/content-types")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "uid": "api::guide.guide",
+                            "kind": "collectionType",
+                            "singularName": "guide",
+                            "pluralName": "guides",
+                            "displayName": "Guide",
+                            "draftAndPublish": true,
+                            "i18nEnabled": true,
+                            "fields": [
+                                { "name": "title", "fieldType": "string", "required": true },
+                                {
+                                    "name": "brand_color",
+                                    "fieldType": "custom",
+                                    "customFieldUid": "global::color-picker"
+                                }
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ct_create.status(), StatusCode::OK);
+
+        // 2. Native & Sandboxed WASM Plugins + Marketplace + Fuel Trap
+        let native_inv = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/plugins/rapi%3A%3Aseo-analyzer/invoke")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "payload": {
+                                "title": "Complete Guide to Rust Axum Headless CMS Architecture",
+                                "text": "Rust and SQLite WAL deliver deterministic sub-millisecond reads."
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(native_inv.status(), StatusCode::OK);
+        let native_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(native_inv.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(native_json["data"]["runtime"], "native");
+        assert!(native_json["data"]["output"]["seoScore"].as_i64().unwrap() >= 70);
+
+        let inst_wasm = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/plugins/marketplace/wasm-reading-time/install")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(inst_wasm.status(), StatusCode::OK);
+
+        let run_wasm = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/plugins/wasm-reading-time/invoke")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "payload": { "input": 300 } }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(run_wasm.status(), StatusCode::OK);
+        let run_wasm_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(run_wasm.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(run_wasm_json["data"]["runtime"], "wasm");
+        assert_eq!(run_wasm_json["data"]["output"], 21);
+        assert!(run_wasm_json["data"]["fuelConsumed"].as_u64().unwrap() > 0);
+
+        // Disable WASM plugin -> invoke returns 403 Forbidden
+        let disable_wasm = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/plugins/wasm-reading-time")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "enabled": false }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(disable_wasm.status(), StatusCode::OK);
+
+        let run_disabled = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/plugins/wasm-reading-time/invoke")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "payload": { "input": 100 } }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(run_disabled.status(), StatusCode::FORBIDDEN);
+
+        // Upload infinite-loop WASM module -> execution deterministically traps at fuel ceiling (400)
+        let upload_loop = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/plugins/wasm")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "infinite-loop-test",
+                            "version": "0.1.0",
+                            "description": "Fuel exhaustion trap verification",
+                            "wasmBase64": "AGFzbQEAAAABBgFgAX8BfwMCAQAHBwEDcnVuAAAKCwEJAANADAALQQAL"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(upload_loop.status(), StatusCode::OK);
+
+        let invoke_loop = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/plugins/infinite-loop-test/invoke")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "payload": { "input": 1 } }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invoke_loop.status(), StatusCode::BAD_REQUEST);
+
+        // 3. JSON-RPC 2.0 MCP Server (`/api/mcp`) + RBAC scoping
+        let unauth_mcp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/mcp")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" })
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauth_mcp.status(), StatusCode::UNAUTHORIZED);
+
+        // Notification without `id` -> 202 Accepted
+        let notif_mcp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/mcp")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "method": "notifications/initialized"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(notif_mcp.status(), StatusCode::ACCEPTED);
+
+        // `initialize` + `tools/list` + `tools/call` (`create_document` & `publish_document`)
+        let init_mcp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/mcp")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": 10,
+                            "method": "initialize",
+                            "params": {}
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(init_mcp.status(), StatusCode::OK);
+        let init_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(init_mcp.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(init_json["result"]["serverInfo"]["name"], "rapi-cms-mcp");
+
+        let mcp_create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/mcp")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": 11,
+                            "method": "tools/call",
+                            "params": {
+                                "name": "create_document",
+                                "arguments": {
+                                    "uid": "api::guide.guide",
+                                    "data": {
+                                        "title": "MCP Authored Guide",
+                                        "brand_color": "#4f46e5"
+                                    }
+                                }
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mcp_create_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(mcp_create.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(mcp_create_json["result"]["isError"], false);
+        let guide_doc_id = mcp_create_json["result"]["structuredContent"]["documentId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let mcp_pub = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/mcp")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": 12,
+                            "method": "tools/call",
+                            "params": {
+                                "name": "publish_document",
+                                "arguments": {
+                                    "uid": "api::guide.guide",
+                                    "documentId": guide_doc_id
+                                }
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mcp_pub_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(mcp_pub.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(mcp_pub_json["result"]["isError"], false);
+
+        // Read-Only API Token can read via MCP, but `create_document` is blocked by RBAC
+        let ro_tok_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/api-tokens")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "MCP Reader",
+                            "description": "Read-only agent token",
+                            "type": "read-only"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let ro_tok_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(ro_tok_res.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let ro_key = ro_tok_json["data"]["accessKey"].as_str().unwrap().to_string();
+
+        let ro_read = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/mcp")
+                    .header("authorization", format!("Bearer {ro_key}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": 13,
+                            "method": "tools/call",
+                            "params": {
+                                "name": "list_documents",
+                                "arguments": { "uid": "api::guide.guide" }
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let ro_read_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(ro_read.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(ro_read_json["result"]["isError"], false);
+        assert_eq!(
+            ro_read_json["result"]["structuredContent"]["data"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let ro_write = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/mcp")
+                    .header("authorization", format!("Bearer {ro_key}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": 14,
+                            "method": "tools/call",
+                            "params": {
+                                "name": "create_document",
+                                "arguments": {
+                                    "uid": "api::guide.guide",
+                                    "data": { "title": "Blocked Write" }
+                                }
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let ro_write_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(ro_write.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(ro_write_json["result"]["isError"], true);
+
+        // 4. OIDC SSO End-to-End Flow against Mock OIDC Identity Provider
+        let idp_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let idp_addr = idp_listener.local_addr().unwrap();
+        let issuer_base = format!("http://{idp_addr}");
+        let issuer_clone = issuer_base.clone();
+
+        let mock_idp = Router::new()
+            .route(
+                "/.well-known/openid-configuration",
+                axum::routing::get(move || {
+                    let iss = issuer_clone.clone();
+                    async move {
+                        Json(serde_json::json!({
+                            "issuer": iss,
+                            "authorization_endpoint": format!("{iss}/authorize"),
+                            "token_endpoint": format!("{iss}/token"),
+                            "userinfo_endpoint": format!("{iss}/userinfo"),
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/token",
+                axum::routing::post(|| async {
+                    Json(serde_json::json!({
+                        "access_token": "mock_oidc_access_token_xyz",
+                        "token_type": "Bearer",
+                        "expires_in": 3600
+                    }))
+                }),
+            )
+            .route(
+                "/userinfo",
+                axum::routing::get(|| async {
+                    Json(serde_json::json!({
+                        "sub": "oidc_user_001",
+                        "email": "grace@rapi.local",
+                        "email_verified": true,
+                        "given_name": "Grace",
+                        "family_name": "Hopper"
+                    }))
+                }),
+            );
+        tokio::spawn(async move {
+            let _ = axum::serve(idp_listener, mock_idp).await;
+        });
+
+        let sso_create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/sso/config")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "Mock Enterprise OIDC",
+                            "issuerUrl": issuer_base,
+                            "clientId": "rapi_client",
+                            "clientSecret": "rapi_secret_123",
+                            "defaultRoleId": "role_editor",
+                            "autoProvision": true
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sso_create.status(), StatusCode::OK);
+        let sso_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(sso_create.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let provider_id = sso_json["data"]["id"].as_str().unwrap().to_string();
+
+        let authz_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/admin/auth/sso/{provider_id}/authorize?redirectUri=http%3A%2F%2Flocalhost%3A5173%2Flogin"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(authz_res.status(), StatusCode::OK);
+        let authz_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(authz_res.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let valid_state = authz_json["data"]["state"].as_str().unwrap().to_string();
+        assert!(authz_json["data"]["authorizeUrl"]
+            .as_str()
+            .unwrap()
+            .contains("/authorize?response_type=code"));
+
+        // Forged state is rejected with 401
+        let forged_cb = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/admin/auth/sso/{provider_id}/callback"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "code": "valid_code_1",
+                            "state": "forged_csrf_state",
+                            "redirectUri": "http://localhost:5173/login"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(forged_cb.status(), StatusCode::UNAUTHORIZED);
+
+        // Valid state exchanges code, fetches userinfo, and auto-provisions Grace Hopper
+        let ok_cb = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/admin/auth/sso/{provider_id}/callback"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "code": "valid_code_1",
+                            "state": valid_state,
+                            "redirectUri": "http://localhost:5173/login"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok_cb.status(), StatusCode::OK);
+        let ok_cb_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(ok_cb.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(ok_cb_json["data"]["user"]["email"], "grace@rapi.local");
+        assert!(ok_cb_json["data"]["token"].as_str().is_some());
+
+        // Replaying the single-use OIDC state fails with 401
+        let replay_cb = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/admin/auth/sso/{provider_id}/callback"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "code": "valid_code_1",
+                            "state": valid_state,
+                            "redirectUri": "http://localhost:5173/login"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replay_cb.status(), StatusCode::UNAUTHORIZED);
+
+        // 5. Opt-in AI Editorial Assistant (403 when disabled, 200 once enabled)
+        let ai_disabled = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/ai/complete")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "task": "seo_summary",
+                            "content": "Headless CMS built with Rust and SQLite WAL."
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ai_disabled.status(), StatusCode::FORBIDDEN);
+
+        let ai_enable = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/ai/config")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "isEnabled": true,
+                            "provider": "local-deterministic"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ai_enable.status(), StatusCode::OK);
+
+        let ai_ok = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/ai/complete")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "task": "translate",
+                            "targetLocale": "de",
+                            "content": "Welcome to RAPI"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ai_ok.status(), StatusCode::OK);
+        let ai_ok_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(ai_ok.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(
+            ai_ok_json["data"]["result"]["translatedText"],
+            "[de] Welcome to RAPI"
+        );
+    }
+
+    #[tokio::test]
+    async fn phase7_security_and_parity_regressions() {
+        let app = test_router().await;
+
+        let reg = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/register-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "email": "sec7@rapi.local",
+                            "password": "AdminPassword123!",
+                            "firstname": "Sec",
+                            "lastname": "Audit"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let reg_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(reg.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let jwt = reg_json["data"]["token"].as_str().unwrap().to_string();
+
+        // BUG-P7-01: AI apiKey is redacted in audit_logs and classified as `ai.config`
+        let ai_cfg = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/ai/config")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "isEnabled": true,
+                            "provider": "local-deterministic",
+                            "apiKey": "sk-secret-do-not-leak-999"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ai_cfg.status(), StatusCode::OK);
+
+        let logs_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/audit-logs?action=ai.config")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(logs_res.status(), StatusCode::OK);
+        let logs_text = String::from_utf8(
+            to_bytes(logs_res.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(logs_text.contains("ai.config"));
+        assert!(!logs_text.contains("sk-secret-do-not-leak-999"));
+        assert!(logs_text.contains("[REDACTED]"));
+
+        // BUG-P7-04: Schema referencing unregistered customFieldUid is rejected with 400
+        let bad_cf_schema = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/content-types")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "uid": "api::broken.broken",
+                            "kind": "collectionType",
+                            "singularName": "broken",
+                            "pluralName": "brokens",
+                            "displayName": "Broken",
+                            "draftAndPublish": true,
+                            "i18nEnabled": false,
+                            "fields": [
+                                {
+                                    "name": "missing_widget",
+                                    "fieldType": "custom",
+                                    "customFieldUid": "unknown::nonexistent"
+                                }
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bad_cf_schema.status(), StatusCode::BAD_REQUEST);
+
+        // BUG-P7-03 & BUG-P7-05: OIDC untrusted redirectUri rejected + PUT /admin/sso/config/{id} toggle
+        let sso_create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/sso/config")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "Toggle IdP",
+                            "issuerUrl": "https://idp.example.com",
+                            "authorizationEndpoint": "https://idp.example.com/authorize",
+                            "tokenEndpoint": "https://idp.example.com/token",
+                            "userinfoEndpoint": "https://idp.example.com/userinfo",
+                            "clientId": "cid",
+                            "clientSecret": "csec"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sso_create.status(), StatusCode::OK);
+        let sso_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(sso_create.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let pid = sso_json["data"]["id"].as_str().unwrap();
+
+        let evil_redir = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/admin/auth/sso/{pid}/authorize?redirectUri=https%3A%2F%2Fevil.example%2Fsteal"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(evil_redir.status(), StatusCode::BAD_REQUEST);
+
+        let disable_sso = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/admin/sso/config/{pid}"))
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "isEnabled": false }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(disable_sso.status(), StatusCode::OK);
+
+        let pub_after = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/sso/providers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let pub_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(pub_after.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(pub_json["data"].as_array().unwrap().len(), 0);
     }
 }

@@ -277,7 +277,7 @@ Each phase ends with runnable software + automated tests.
 - [x] **Phase 4 — Media Library**
 - [x] **Phase 5 — i18n, preview, governance**
 - [x] **Phase 6 — GraphQL, integrations, data management**
-- [ ] **Phase 7 — Extensibility (WASM plugins, MCP, OIDC, AI) & parity polish**
+- [x] **Phase 7 — Extensibility (WASM plugins, MCP, OIDC, AI) & parity polish**
 
 ---
 

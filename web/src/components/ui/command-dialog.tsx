@@ -1,6 +1,7 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import {
   Blocks,
+  Bot,
   Database,
   Eye,
   FileJson,
@@ -8,11 +9,14 @@ import {
   GitPullRequest,
   Globe,
   KeyRound,
+  Layers,
   LayoutDashboard,
+  Plug,
   Rocket,
   ScrollText,
   Search,
   ShieldCheck,
+  Terminal,
   Webhook,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -34,6 +38,11 @@ const COMMAND_ITEMS = [
   { label: "Webhooks", path: "/settings/webhooks", group: "Settings", icon: Webhook },
   { label: "Email Delivery & Templates", path: "/settings/email", group: "Settings", icon: Globe },
   { label: "Data Transfer & Strapi v5 Import", path: "/settings/data-transfer", group: "Settings", icon: Database },
+  { label: "Plugins & WASM Marketplace", path: "/settings/plugins", group: "Extensibility", icon: Plug },
+  { label: "Custom Fields Registry", path: "/settings/custom-fields", group: "Extensibility", icon: Layers },
+  { label: "Single Sign-On (OIDC)", path: "/settings/sso", group: "Extensibility", icon: ShieldCheck },
+  { label: "Opt-in AI Editorial Assistant", path: "/settings/ai", group: "Extensibility", icon: Bot },
+  { label: "MCP Server Inspector & Platform Settings", path: "/settings/general", group: "Extensibility", icon: Terminal },
   { label: "GraphQL Explorer (/graphql)", path: "/graphql", external: true, group: "API", icon: FileJson },
   { label: "First-admin onboarding", path: "/onboarding", group: "Auth", icon: ShieldCheck },
   { label: "OpenAPI 3.1 JSON specification", path: "/openapi.json", external: true, group: "API", icon: FileJson },

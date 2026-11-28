@@ -723,7 +723,7 @@ pub async fn audit_log_middleware(
                 let parsed = if bytes.len() <= AUDIT_PAYLOAD_STORE_MAX_BYTES {
                     serde_json::from_slice::<serde_json::Value>(&bytes)
                         .ok()
-                        .map(redact_sensitive_json)
+                        .map(|v| redact_sensitive_json(v, path.contains("/sso/")))
                 } else {
                     Some(serde_json::json!({
                         "_truncated": true,
@@ -878,11 +878,36 @@ fn classify_admin_action(method: &Method, path: &str) -> (String, Option<String>
             None,
             segs.get(2).map(|s| (*s).to_string()),
         ),
+        Some("plugins") => (
+            format!("plugin.{}", method.as_str().to_lowercase()),
+            None,
+            segs.get(2).map(|s| (*s).to_string()),
+        ),
+        Some("custom-fields") => (
+            format!("custom_field.{}", method.as_str().to_lowercase()),
+            segs.get(2).map(|s| percent_decode(s)),
+            None,
+        ),
+        Some("sso") => (
+            format!("sso.{}", method.as_str().to_lowercase()),
+            None,
+            segs.get(3).map(|s| (*s).to_string()),
+        ),
+        Some("auth") if segs.get(2).copied() == Some("sso") => (
+            "sso.callback".into(),
+            None,
+            segs.get(3).map(|s| (*s).to_string()),
+        ),
+        Some("ai") => (
+            format!("ai.{}", segs.get(2).copied().unwrap_or("mutate")),
+            None,
+            None,
+        ),
         _ => (format!("admin.{}", method.as_str().to_lowercase()), None, None),
     }
 }
 
-fn redact_sensitive_json(val: serde_json::Value) -> serde_json::Value {
+fn redact_sensitive_json(val: serde_json::Value, redact_oidc_code: bool) -> serde_json::Value {
     const SENSITIVE_KEYS: &[&str] = &[
         "password",
         "currentpassword",
@@ -891,23 +916,31 @@ fn redact_sensitive_json(val: serde_json::Value) -> serde_json::Value {
         "token",
         "refreshtoken",
         "accesskey",
+        "apikey",
+        "api_key",
+        "authorization",
+        "wasmbase64",
     ];
     match val {
         serde_json::Value::Object(map) => {
             let mut clean = serde_json::Map::with_capacity(map.len());
             for (k, v) in map {
                 let lower = k.to_ascii_lowercase();
-                if SENSITIVE_KEYS.iter().any(|sk| lower.contains(sk)) {
+                if SENSITIVE_KEYS.iter().any(|sk| lower.contains(sk))
+                    || (redact_oidc_code && lower == "code")
+                {
                     clean.insert(k, serde_json::Value::String("[REDACTED]".into()));
                 } else {
-                    clean.insert(k, redact_sensitive_json(v));
+                    clean.insert(k, redact_sensitive_json(v, redact_oidc_code));
                 }
             }
             serde_json::Value::Object(clean)
         }
-        serde_json::Value::Array(arr) => {
-            serde_json::Value::Array(arr.into_iter().map(redact_sensitive_json).collect())
-        }
+        serde_json::Value::Array(arr) => serde_json::Value::Array(
+            arr.into_iter()
+                .map(|v| redact_sensitive_json(v, redact_oidc_code))
+                .collect(),
+        ),
         other => other,
     }
 }

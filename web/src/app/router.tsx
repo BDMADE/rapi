@@ -9,7 +9,13 @@ import { EntryEditorPage } from "@/features/content-manager/entry-editor-page";
 import { ContentTypeBuilderPage } from "@/features/content-type-builder/builder-page";
 import { OverviewPage } from "@/features/dashboard/overview-page";
 import { MediaLibraryPage } from "@/features/media/media-library-page";
-import { ModulePlaceholderPage } from "@/features/placeholders/workspace-views";
+import {
+  AiSettingsPage,
+  CustomFieldsPage,
+  GeneralSettingsPage,
+  PluginsPage,
+  SsoSettingsPage,
+} from "@/features/settings/extensibility-pages";
 import {
   AuditLogsPage,
   LocalesPage,
@@ -128,8 +134,32 @@ export const router = createBrowserRouter([
         element: <DataTransferPage />,
       },
       {
+        path: "settings/plugins",
+        element: <PluginsPage />,
+      },
+      {
+        path: "settings/custom-fields",
+        element: <CustomFieldsPage />,
+      },
+      {
+        path: "settings/sso",
+        element: <SsoSettingsPage />,
+      },
+      {
+        path: "settings/ai",
+        element: <AiSettingsPage />,
+      },
+      {
+        path: "settings/mcp",
+        element: <GeneralSettingsPage />,
+      },
+      {
+        path: "settings/general",
+        element: <GeneralSettingsPage />,
+      },
+      {
         path: "settings/:section",
-        element: <ModulePlaceholderPage moduleKey="settings" />,
+        element: <GeneralSettingsPage />,
       },
       {
         path: "*",

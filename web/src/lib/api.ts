@@ -350,6 +350,75 @@ export interface PreviewConfigDto {
   updatedAt: string;
 }
 
+export interface CustomFieldDto {
+  uid: string;
+  pluginName: string | null;
+  name: string;
+  underlyingType: string;
+  options: Record<string, unknown>;
+}
+
+export interface InstalledPluginDto {
+  name: string;
+  version: string;
+  kind: "native" | "wasm" | string;
+  description: string;
+  enabled: boolean;
+  config: Record<string, unknown>;
+  installedAt: string;
+}
+
+export interface MarketplacePluginDto {
+  name: string;
+  version: string;
+  description: string;
+  category: string;
+  installed: boolean;
+}
+
+export interface SsoProviderDto {
+  id: string;
+  name: string;
+  issuerUrl: string;
+  authorizationEndpoint: string | null;
+  tokenEndpoint: string | null;
+  userinfoEndpoint: string | null;
+  clientId: string;
+  hasClientSecret: boolean;
+  scopes: string;
+  defaultRoleId: string;
+  autoProvision: boolean;
+  isEnabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PublicSsoProviderDto {
+  id: string;
+  name: string;
+}
+
+export interface AiSettingsDto {
+  isEnabled: boolean;
+  provider: "local-deterministic" | "openai-compatible" | string;
+  apiUrl: string;
+  hasApiKey: boolean;
+  model: string;
+  updatedAt: string;
+}
+
+export interface AiCompletionOutputDto {
+  result: Record<string, unknown>;
+  provider: string;
+  model: string;
+}
+
+export interface McpToolDescriptor {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}
+
 export interface ResolvedPreviewDto {
   url: string;
   openMode: string;
@@ -1446,5 +1515,194 @@ export const api = {
           body: JSON.stringify(archive),
         },
       )
+    ).data,
+
+  // Phase 7 — Custom Fields
+  listCustomFields: async () =>
+    (await requestJson<ApiResponse<CustomFieldDto[]>>("/admin/custom-fields")).data,
+
+  registerCustomField: async (payload: {
+    uid: string;
+    pluginName?: string | null;
+    name: string;
+    underlyingType: string;
+    options?: Record<string, unknown>;
+  }) =>
+    (
+      await requestJson<ApiResponse<CustomFieldDto>>("/admin/custom-fields", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      })
+    ).data,
+
+  deleteCustomField: async (uid: string) =>
+    requestJson<ApiResponse<{ deleted: string }>>(
+      `/admin/custom-fields/${encodeURIComponent(uid)}`,
+      { method: "DELETE" },
+    ),
+
+  // Phase 7 — Native & Sandboxed WASM Plugins + Marketplace
+  listPlugins: async () =>
+    (await requestJson<ApiResponse<InstalledPluginDto[]>>("/admin/plugins")).data,
+
+  listMarketplacePlugins: async () =>
+    (await requestJson<ApiResponse<MarketplacePluginDto[]>>("/admin/plugins/marketplace")).data,
+
+  installMarketplacePlugin: async (name: string) =>
+    (
+      await requestJson<ApiResponse<InstalledPluginDto>>(
+        `/admin/plugins/marketplace/${encodeURIComponent(name)}/install`,
+        { method: "POST" },
+      )
+    ).data,
+
+  installCustomWasmPlugin: async (payload: {
+    name: string;
+    version: string;
+    description: string;
+    wasmBase64: string;
+  }) =>
+    (
+      await requestJson<ApiResponse<InstalledPluginDto>>("/admin/plugins/wasm", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      })
+    ).data,
+
+  updatePlugin: async (
+    name: string,
+    payload: { enabled?: boolean; config?: Record<string, unknown> },
+  ) =>
+    (
+      await requestJson<ApiResponse<InstalledPluginDto>>(
+        `/admin/plugins/${encodeURIComponent(name)}`,
+        {
+          method: "PUT",
+          body: JSON.stringify(payload),
+        },
+      )
+    ).data,
+
+  uninstallPlugin: async (name: string) =>
+    requestJson<ApiResponse<{ deleted: string }>>(
+      `/admin/plugins/${encodeURIComponent(name)}`,
+      { method: "DELETE" },
+    ),
+
+  invokePlugin: async (name: string, payload: Record<string, unknown>, action = "run") =>
+    (
+      await requestJson<ApiResponse<Record<string, unknown>>>(
+        `/admin/plugins/${encodeURIComponent(name)}/invoke`,
+        {
+          method: "POST",
+          body: JSON.stringify({ action, payload }),
+        },
+      )
+    ).data,
+
+  // Phase 7 — JSON-RPC 2.0 MCP Server
+  callMcpRpc: async (rpcPayload: Record<string, unknown>) =>
+    requestJson<Record<string, unknown>>("/api/mcp", {
+      method: "POST",
+      body: JSON.stringify(rpcPayload),
+    }),
+
+  // Phase 7 — OIDC Single Sign-On (SSO)
+  listPublicSsoProviders: async () =>
+    (await requestJson<ApiResponse<PublicSsoProviderDto[]>>("/admin/sso/providers")).data,
+
+  listSsoConfig: async () =>
+    (await requestJson<ApiResponse<SsoProviderDto[]>>("/admin/sso/config")).data,
+
+  createSsoProvider: async (payload: {
+    name: string;
+    issuerUrl: string;
+    authorizationEndpoint?: string;
+    tokenEndpoint?: string;
+    userinfoEndpoint?: string;
+    clientId: string;
+    clientSecret: string;
+    scopes?: string;
+    defaultRoleId?: string;
+    autoProvision?: boolean;
+    isEnabled?: boolean;
+  }) =>
+    (
+      await requestJson<ApiResponse<SsoProviderDto>>("/admin/sso/config", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      })
+    ).data,
+
+  updateSsoProvider: async (
+    id: string,
+    payload: { isEnabled?: boolean; autoProvision?: boolean; defaultRoleId?: string },
+  ) =>
+    (
+      await requestJson<ApiResponse<SsoProviderDto>>(
+        `/admin/sso/config/${encodeURIComponent(id)}`,
+        {
+          method: "PUT",
+          body: JSON.stringify(payload),
+        },
+      )
+    ).data,
+
+  deleteSsoProvider: async (id: string) =>
+    requestJson<ApiResponse<{ deleted: string }>>(
+      `/admin/sso/config/${encodeURIComponent(id)}`,
+      { method: "DELETE" },
+    ),
+
+  beginSsoAuthorize: async (id: string, redirectUri: string) =>
+    (
+      await requestJson<ApiResponse<{ authorizeUrl: string; state: string }>>(
+        `/admin/auth/sso/${encodeURIComponent(id)}/authorize?redirectUri=${encodeURIComponent(redirectUri)}`,
+      )
+    ).data,
+
+  completeSsoCallback: async (
+    id: string,
+    payload: { code: string; state: string; redirectUri: string },
+  ) =>
+    (
+      await requestJson<ApiResponse<AuthTokenResponse>>(
+        `/admin/auth/sso/${encodeURIComponent(id)}/callback`,
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+        },
+      )
+    ).data,
+
+  // Phase 7 — Opt-in AI Editorial Assistant
+  getAiSettings: async () =>
+    (await requestJson<ApiResponse<AiSettingsDto>>("/admin/ai/config")).data,
+
+  updateAiSettings: async (payload: {
+    isEnabled?: boolean;
+    provider?: string;
+    apiUrl?: string;
+    apiKey?: string | null;
+    model?: string;
+  }) =>
+    (
+      await requestJson<ApiResponse<AiSettingsDto>>("/admin/ai/config", {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      })
+    ).data,
+
+  completeAiTask: async (payload: {
+    task: "translate" | "generate_draft" | "seo_summary";
+    content: string;
+    targetLocale?: string;
+    context?: string;
+  }) =>
+    (
+      await requestJson<ApiResponse<AiCompletionOutputDto>>("/admin/ai/complete", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      })
     ).data,
 };

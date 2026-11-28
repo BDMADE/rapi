@@ -1,9 +1,9 @@
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ShieldCheck } from "lucide-react";
-import { useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { KeyRound, ShieldCheck } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { z } from "zod";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -20,9 +20,59 @@ type LoginValues = z.infer<typeof loginSchema>;
 
 export function LoginPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const setSession = useAuthStore((s) => s.setSession);
   const queryClient = useQueryClient();
   const [serverError, setServerError] = useState<string | null>(null);
+  const ssoHandledRef = useRef(false);
+
+  const ssoProvidersQuery = useQuery({
+    queryKey: ["sso-public"],
+    queryFn: api.listPublicSsoProviders,
+    retry: false,
+  });
+
+  const ssoCallbackMutation = useMutation({
+    mutationFn: (p: { id: string; code: string; state: string; redirectUri: string }) =>
+      api.completeSsoCallback(p.id, {
+        code: p.code,
+        state: p.state,
+        redirectUri: p.redirectUri,
+      }),
+    onSuccess: (data) => {
+      sessionStorage.removeItem("rapi_sso_provider");
+      setSession(data);
+      queryClient.invalidateQueries();
+      navigate("/", { replace: true });
+    },
+    onError: (err: Error) => {
+      setServerError(err.message);
+    },
+  });
+
+  useEffect(() => {
+    const code = searchParams.get("code");
+    const state = searchParams.get("state");
+    const providerId =
+      searchParams.get("sso_provider") ?? sessionStorage.getItem("rapi_sso_provider");
+    if (code && state && providerId && !ssoHandledRef.current) {
+      ssoHandledRef.current = true;
+      const redirectUri = `${window.location.origin}/login`;
+      ssoCallbackMutation.mutate({ id: providerId, code, state, redirectUri });
+    }
+  }, [searchParams, ssoCallbackMutation]);
+
+  const handleStartSso = async (providerId: string) => {
+    setServerError(null);
+    try {
+      const redirectUri = `${window.location.origin}/login`;
+      sessionStorage.setItem("rapi_sso_provider", providerId);
+      const { authorizeUrl } = await api.beginSsoAuthorize(providerId, redirectUri);
+      window.location.assign(authorizeUrl);
+    } catch (err) {
+      setServerError(err instanceof Error ? err.message : "Failed starting OIDC login");
+    }
+  };
 
   const {
     register,
@@ -98,6 +148,25 @@ export function LoginPage() {
             {loginMutation.isPending ? "Signing in..." : "Sign in"}
           </Button>
         </form>
+
+        {(ssoProvidersQuery.data ?? []).length > 0 && (
+          <div className="mt-4 space-y-2 border-t border-zinc-200 pt-4">
+            <div className="text-[11px] font-medium text-zinc-500">Enterprise Single Sign-On</div>
+            {(ssoProvidersQuery.data ?? []).map((prov) => (
+              <Button
+                key={prov.id}
+                type="button"
+                variant="secondary"
+                className="w-full"
+                disabled={ssoCallbackMutation.isPending}
+                onClick={() => handleStartSso(prov.id)}
+              >
+                <KeyRound className="h-3.5 w-3.5 text-indigo-700" />
+                Continue with {prov.name}
+              </Button>
+            ))}
+          </div>
+        )}
 
         <div className="mt-5 flex items-center justify-between border-t border-zinc-200 pt-4 text-xs text-zinc-500">
           <Link to="/forgot-password" className="hover:text-zinc-900">
