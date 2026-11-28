@@ -22,7 +22,12 @@ import {
   TabsTrigger,
   useToast,
 } from "@/components/ui";
-import { type AdminUserDto, api, type PermissionCatalogItem } from "@/lib/api";
+import {
+  type AdminUserDto,
+  api,
+  type EndUserDto,
+  type PermissionCatalogItem,
+} from "@/lib/api";
 
 export function UsersRolesPage() {
   const { pushToast } = useToast();
@@ -30,6 +35,8 @@ export function UsersRolesPage() {
 
   const usersQuery = useQuery({ queryKey: ["admin-users"], queryFn: api.listAdminUsers });
   const rolesQuery = useQuery({ queryKey: ["admin-roles"], queryFn: api.listRoles });
+  const endUsersQuery = useQuery({ queryKey: ["end-users"], queryFn: api.listEndUsers });
+  const userRolesQuery = useQuery({ queryKey: ["user-roles"], queryFn: api.listUserRoles });
   const catalogQuery = useQuery({
     queryKey: ["permission-catalog"],
     queryFn: api.getPermissionCatalog,
@@ -38,9 +45,10 @@ export function UsersRolesPage() {
     queryKey: ["schemas-catalog"],
     queryFn: api.listSchemas,
   });
+  const [selectedUserRoleId, setSelectedUserRoleId] = useState<string>("urole_public");
   const publicPermsQuery = useQuery({
-    queryKey: ["public-permissions"],
-    queryFn: api.getPublicPermissions,
+    queryKey: ["user-role-permissions", selectedUserRoleId],
+    queryFn: () => api.getUserRolePermissions(selectedUserRoleId),
   });
 
   const [publicActions, setPublicActions] = useState<Set<string>>(new Set());
@@ -52,15 +60,61 @@ export function UsersRolesPage() {
 
   const savePublicPermsMut = useMutation({
     mutationFn: () =>
-      api.updatePublicPermissions(
+      api.updateUserRolePermissions(
+        selectedUserRoleId,
         Array.from(publicActions).map((action) => ({ action })),
       ),
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["user-role-permissions", selectedUserRoleId] });
       queryClient.invalidateQueries({ queryKey: ["public-permissions"] });
-      pushToast({ title: "Public Content API permissions saved", tone: "success" });
+      pushToast({ title: "Content API & GraphQL role permissions saved", tone: "success" });
     },
     onError: (e: Error) =>
       pushToast({ title: "Save failed", description: e.message, tone: "error" }),
+  });
+
+  // End-user create modal state
+  const [endUserOpen, setEndUserOpen] = useState(false);
+  const [euUsername, setEuUsername] = useState("");
+  const [euEmail, setEuEmail] = useState("");
+  const [euPassword, setEuPassword] = useState("");
+
+  const createEndUserMut = useMutation({
+    mutationFn: () =>
+      api.createEndUser({
+        username: euUsername.trim(),
+        email: euEmail.trim(),
+        password: euPassword,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["end-users"] });
+      queryClient.invalidateQueries({ queryKey: ["user-roles"] });
+      setEndUserOpen(false);
+      setEuUsername("");
+      setEuEmail("");
+      setEuPassword("");
+      pushToast({ title: "End-user registered", tone: "success" });
+    },
+    onError: (e: Error) =>
+      pushToast({ title: "Create failed", description: e.message, tone: "error" }),
+  });
+
+  const toggleEndUserBlockedMut = useMutation({
+    mutationFn: ({ id, blocked }: { id: string; blocked: boolean }) =>
+      api.updateEndUser(id, { blocked }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["end-users"] });
+      pushToast({ title: "Updated end-user block status", tone: "success" });
+    },
+  });
+
+  const deleteEndUserMut = useMutation({
+    mutationFn: (id: string) => api.deleteEndUser(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["end-users"] });
+      queryClient.invalidateQueries({ queryKey: ["user-roles"] });
+      pushToast({ title: "End-user deleted", tone: "success" });
+    },
   });
 
   const [selectedRoleId, setSelectedRoleId] = useState<string>("role_editor");
@@ -192,8 +246,11 @@ export function UsersRolesPage() {
       <Tabs defaultValue="users" className="space-y-4">
         <TabsList>
           <TabsTrigger value="users">Administrators ({usersQuery.data?.length ?? 0})</TabsTrigger>
-          <TabsTrigger value="roles">Roles &amp; Permission Matrix</TabsTrigger>
-          <TabsTrigger value="public">Public Content API Access</TabsTrigger>
+          <TabsTrigger value="end-users">
+            End-Users ({endUsersQuery.data?.length ?? 0})
+          </TabsTrigger>
+          <TabsTrigger value="roles">Admin RBAC Matrix</TabsTrigger>
+          <TabsTrigger value="public">Content API &amp; GraphQL Roles</TabsTrigger>
         </TabsList>
 
         <TabsContent value="users" className="space-y-3">
@@ -514,17 +571,159 @@ export function UsersRolesPage() {
           </div>
         </TabsContent>
 
+        <TabsContent value="end-users" className="space-y-3">
+          <div className="flex justify-end">
+            <Dialog open={endUserOpen} onOpenChange={setEndUserOpen}>
+              <DialogTrigger asChild>
+                <Button size="sm">
+                  <Plus className="h-3.5 w-3.5" />
+                  Register end-user
+                </Button>
+              </DialogTrigger>
+              <DialogContent title="Create End-User (/api/auth/local)">
+                <div className="space-y-3 text-xs">
+                  <div>
+                    <label className="mb-1 block font-medium text-zinc-700">Username</label>
+                    <Input
+                      value={euUsername}
+                      onChange={(e) => setEuUsername(e.target.value)}
+                      placeholder="alice_dev"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block font-medium text-zinc-700">Email</label>
+                    <Input
+                      type="email"
+                      value={euEmail}
+                      onChange={(e) => setEuEmail(e.target.value)}
+                      placeholder="alice@example.com"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block font-medium text-zinc-700">
+                      Password (min 8 chars)
+                    </label>
+                    <Input
+                      type="password"
+                      value={euPassword}
+                      onChange={(e) => setEuPassword(e.target.value)}
+                    />
+                  </div>
+                  <div className="flex justify-end gap-2 pt-2">
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={() => setEndUserOpen(false)}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      size="sm"
+                      disabled={
+                        !euUsername.trim() ||
+                        !euEmail.trim() ||
+                        euPassword.length < 8 ||
+                        createEndUserMut.isPending
+                      }
+                      onClick={() => createEndUserMut.mutate()}
+                    >
+                      Create end-user
+                    </Button>
+                  </div>
+                </div>
+              </DialogContent>
+            </Dialog>
+          </div>
+
+          <DataTable<EndUserDto>
+            rows={endUsersQuery.data ?? []}
+            getRowKey={(u) => u.id}
+            emptyMessage="No registered end-users yet."
+            columns={[
+              {
+                key: "username",
+                header: "Username",
+                render: (u) => <span className="font-medium text-zinc-900">{u.username}</span>,
+              },
+              {
+                key: "email",
+                header: "Email",
+                render: (u) => <span className="font-mono text-xs">{u.email}</span>,
+              },
+              {
+                key: "role",
+                header: "Role",
+                render: (u) => <Badge tone="mono">{u.roleName}</Badge>,
+              },
+              {
+                key: "blocked",
+                header: "Status",
+                render: (u) => (
+                  <div className="flex items-center gap-2">
+                    <Switch
+                      checked={!u.blocked}
+                      onCheckedChange={(active) =>
+                        toggleEndUserBlockedMut.mutate({ id: u.id, blocked: !active })
+                      }
+                    />
+                    <Badge tone={u.blocked ? "rose" : "emerald"}>
+                      {u.blocked ? "blocked" : "active"}
+                    </Badge>
+                  </div>
+                ),
+              },
+              {
+                key: "actions",
+                header: "",
+                className: "text-right",
+                render: (u) => (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => {
+                      if (window.confirm(`Delete end-user "${u.username}"?`)) {
+                        deleteEndUserMut.mutate(u.id);
+                      }
+                    }}
+                  >
+                    <Trash2 className="h-3.5 w-3.5 text-rose-600" />
+                  </Button>
+                ),
+              },
+            ]}
+          />
+        </TabsContent>
+
         <TabsContent value="public">
           <Card>
-            <CardHeader>
-              <CardTitle>Unauthenticated Public Role (/api/*)</CardTitle>
+            <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <CardTitle>REST &amp; GraphQL Role Permissions</CardTitle>
+                <div className="w-48">
+                  <Select
+                    value={selectedUserRoleId}
+                    onValueChange={setSelectedUserRoleId}
+                    options={
+                      (userRolesQuery.data ?? []).length > 0
+                        ? (userRolesQuery.data ?? []).map((r) => ({
+                            value: r.id,
+                            label: `${r.name} (${r.roleType})`,
+                          }))
+                        : [
+                            { value: "urole_public", label: "Public (public)" },
+                            { value: "urole_authenticated", label: "Authenticated (authenticated)" },
+                          ]
+                    }
+                  />
+                </div>
+              </div>
               <Button
                 size="sm"
                 onClick={() => savePublicPermsMut.mutate()}
                 disabled={savePublicPermsMut.isPending}
               >
                 <Save className="h-3.5 w-3.5" />
-                Save public permissions
+                Save role permissions
               </Button>
             </CardHeader>
             <CardContent className="space-y-4">

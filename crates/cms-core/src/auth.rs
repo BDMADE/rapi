@@ -136,6 +136,12 @@ pub enum Actor {
         token_type: TokenType,
         permissions: Vec<PermissionRule>,
     },
+    EndUser {
+        user_id: String,
+        email: String,
+        role_id: String,
+        permissions: Vec<PermissionRule>,
+    },
     Public {
         permissions: Vec<PermissionRule>,
     },
@@ -171,7 +177,9 @@ impl Actor {
                 }
                 TokenType::Custom => matches_permission(permissions, action, target_uid),
             },
-            Self::Public { permissions } => matches_permission(permissions, action, target_uid),
+            Self::EndUser { permissions, .. } | Self::Public { permissions } => {
+                matches_permission(permissions, action, target_uid)
+            }
         }
     }
 }
@@ -365,6 +373,42 @@ pub fn builtin_permission_catalog() -> Vec<PermissionCatalogItem> {
             label: "Read audit logs".into(),
             category: "Governance".into(),
             description: "Query and inspect administrator mutation audit trails.".into(),
+        },
+        PermissionCatalogItem {
+            action: "admin::webhooks.read".into(),
+            label: "Read webhooks".into(),
+            category: "Integrations".into(),
+            description: "List webhooks and inspect delivery logs.".into(),
+        },
+        PermissionCatalogItem {
+            action: "admin::webhooks.update".into(),
+            label: "Manage & trigger webhooks".into(),
+            category: "Integrations".into(),
+            description: "Create, update, toggle, test-trigger, and delete webhooks.".into(),
+        },
+        PermissionCatalogItem {
+            action: "admin::email.update".into(),
+            label: "Manage email templates & test delivery".into(),
+            category: "Integrations".into(),
+            description: "Edit email templates, inspect outbox, and send test emails.".into(),
+        },
+        PermissionCatalogItem {
+            action: "admin::data-transfer.execute".into(),
+            label: "Export & import platform data".into(),
+            category: "Data Management".into(),
+            description: "Export or import JSON bundles, CSV files, and Strapi v5 archives.".into(),
+        },
+        PermissionCatalogItem {
+            action: "plugin::users-permissions.users.read".into(),
+            label: "Read end-users & user roles".into(),
+            category: "Users & Permissions".into(),
+            description: "List registered end-users and inspect Authenticated/Public roles.".into(),
+        },
+        PermissionCatalogItem {
+            action: "plugin::users-permissions.users.update".into(),
+            label: "Manage end-users & user roles".into(),
+            category: "Users & Permissions".into(),
+            description: "Create, block/unblock, delete end-users, and edit user role permissions.".into(),
         },
     ]
 }

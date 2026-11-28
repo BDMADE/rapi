@@ -63,6 +63,11 @@ pub struct AppConfig {
     pub enable_docs: bool,
     pub request_timeout_secs: u64,
     pub max_body_bytes: usize,
+    pub smtp_host: Option<String>,
+    pub smtp_port: u16,
+    pub smtp_username: Option<String>,
+    pub smtp_password: Option<String>,
+    pub smtp_from: String,
 }
 
 impl fmt::Debug for AppConfig {
@@ -82,6 +87,14 @@ impl fmt::Debug for AppConfig {
             .field("enable_docs", &self.enable_docs)
             .field("request_timeout_secs", &self.request_timeout_secs)
             .field("max_body_bytes", &self.max_body_bytes)
+            .field("smtp_host", &self.smtp_host)
+            .field("smtp_port", &self.smtp_port)
+            .field("smtp_username", &self.smtp_username)
+            .field(
+                "smtp_password",
+                &self.smtp_password.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("smtp_from", &self.smtp_from)
             .finish()
     }
 }
@@ -188,6 +201,27 @@ impl AppConfig {
             .or(file_cfg.server.max_body_bytes)
             .unwrap_or(10 * 1024 * 1024);
 
+        let smtp_host = env::var("SMTP_HOST")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let smtp_port = env::var("SMTP_PORT")
+            .ok()
+            .and_then(|v| v.parse::<u16>().ok())
+            .unwrap_or(587);
+        let smtp_username = env::var("SMTP_USERNAME")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let smtp_password = env::var("SMTP_PASSWORD")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let smtp_from = env::var("SMTP_FROM")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "noreply@rapi.local".to_string());
+
         Self {
             env: env_name,
             host,
@@ -203,6 +237,11 @@ impl AppConfig {
             enable_docs,
             request_timeout_secs,
             max_body_bytes,
+            smtp_host,
+            smtp_port,
+            smtp_username,
+            smtp_password,
+            smtp_from,
         }
     }
 

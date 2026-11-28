@@ -1,6 +1,7 @@
 use crate::auth::AuthService;
 use crate::content::ContentService;
 use crate::governance::GovernanceService;
+use crate::integrations::IntegrationsService;
 use crate::media::MediaService;
 use crate::schema::SchemaService;
 use crate::system::SystemService;
@@ -9,8 +10,8 @@ use cms_core::{
     LocalPubSubBackend, PubSubBackend, QueueBackend,
 };
 use cms_db::{
-    AuthRepository, DbPools, DynamicRepository, GovernanceRepository, MediaRepository,
-    PlatformRepository, RedisRuntime, SchemaEngine, SqliteQueueBackend,
+    AuthRepository, DbPools, DynamicRepository, GovernanceRepository, IntegrationsRepository,
+    MediaRepository, PlatformRepository, RedisRuntime, SchemaEngine, SqliteQueueBackend,
 };
 use cms_plugin_api::PluginRegistry;
 use std::sync::Arc;
@@ -31,6 +32,7 @@ pub struct ServiceContainer {
     pub content: ContentService,
     pub media: MediaService,
     pub governance: GovernanceService,
+    pub integrations: IntegrationsService,
     pub started_at: Instant,
 }
 
@@ -90,6 +92,16 @@ impl ServiceContainer {
             cache.clone(),
             queue.clone(),
         );
+        let int_repo = IntegrationsRepository::new(db.clone());
+        let integrations = IntegrationsService::new(
+            int_repo,
+            config.clone(),
+            auth.clone(),
+            schema.clone(),
+            content.clone(),
+            governance.clone(),
+            queue.clone(),
+        );
 
         Ok(Self {
             config,
@@ -104,6 +116,7 @@ impl ServiceContainer {
             content,
             media,
             governance,
+            integrations,
             started_at,
         })
     }

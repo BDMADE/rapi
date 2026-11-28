@@ -1,6 +1,7 @@
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useQuery } from "@tanstack/react-query";
 import {
+  ArrowLeftRight,
   Blocks,
   ChevronDown,
   Database,
@@ -11,6 +12,7 @@ import {
   KeyRound,
   LayoutDashboard,
   LogOut,
+  Mail,
   PanelLeftClose,
   PanelLeftOpen,
   Rocket,
@@ -55,6 +57,8 @@ const NAV_GROUPS = [
       { label: "Locales (i18n)", to: "/settings/i18n", icon: Globe },
       { label: "Live Preview", to: "/settings/preview", icon: Eye },
       { label: "Webhooks", to: "/settings/webhooks", icon: Webhook },
+      { label: "Email Delivery", to: "/settings/email", icon: Mail },
+      { label: "Data Transfer", to: "/settings/data-transfer", icon: ArrowLeftRight },
       { label: "Platform Settings", to: "/settings/general", icon: Settings },
     ],
   },

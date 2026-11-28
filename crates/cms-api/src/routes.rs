@@ -2,6 +2,8 @@ use crate::auth::{admin_auth_routes, enforce_permission, RequireAdmin};
 use crate::content::content_api_routes;
 use crate::error::HttpApiError;
 use crate::governance::{audit_log_middleware, governance_routes};
+use crate::graphql::{graphql_routes, DynamicGraphqlEngine};
+use crate::integrations::integrations_routes;
 use crate::media::media_routes;
 use crate::openapi::ApiDoc;
 use crate::schema::admin_schema_routes;
@@ -40,6 +42,8 @@ pub fn build_router(services: ServiceContainer) -> Router {
     let max_body_bytes = services.config.max_body_bytes;
     let enable_docs = services.config.enable_docs;
 
+    let gql_engine = DynamicGraphqlEngine::new(services.clone());
+
     let mut router = Router::new()
         .route("/health", get(health_handler))
         .route("/ready", get(ready_handler))
@@ -50,6 +54,8 @@ pub fn build_router(services: ServiceContainer) -> Router {
         .merge(admin_schema_routes())
         .merge(media_routes())
         .merge(governance_routes())
+        .merge(integrations_routes())
+        .merge(graphql_routes(gql_engine))
         .merge(content_api_routes());
 
     if enable_docs {
@@ -2784,5 +2790,531 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(bypass_post.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn phase6_graphql_end_user_auth_webhooks_email_and_data_transfer() {
+        let app = test_router().await;
+
+        let reg = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/register-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "email": "p6admin@rapi.dev",
+                            "password": "StrongPassword123!",
+                            "firstname": "Phase6"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let reg_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(reg.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let admin_jwt = reg_json["data"]["token"].as_str().unwrap().to_string();
+
+        // 1. Strapi v5 Archive Importer -> dynamically provisions `api::product.product` + imports first item
+        let strapi_v5_archive = serde_json::json!({
+            "schemas": [{
+                "uid": "api::product.product",
+                "kind": "collectionType",
+                "info": {
+                    "singularName": "product",
+                    "pluralName": "products",
+                    "displayName": "Product"
+                },
+                "options": { "draftAndPublish": true },
+                "attributes": {
+                    "title": { "type": "string", "required": true },
+                    "price": { "type": "integer", "required": false }
+                }
+            }],
+            "entities": [{
+                "type": "api::product.product",
+                "data": {
+                    "title": "Starter Kit",
+                    "price": 19,
+                    "publishedAt": "2026-01-01T00:00:00Z"
+                }
+            }]
+        });
+        let imp_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/data-transfer/import/strapi-v5")
+                    .header("authorization", format!("Bearer {admin_jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(strapi_v5_archive.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(imp_res.status(), StatusCode::OK);
+
+        // 2. Grant Authenticated End-User Role (`urole_authenticated`) GraphQL/REST permissions on `api::product.product`
+        let perm_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/user-roles/urole_authenticated/permissions")
+                    .header("authorization", format!("Bearer {admin_jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "permissions": [
+                                { "action": "api::product.product.find" },
+                                { "action": "api::product.product.findOne" },
+                                { "action": "api::product.product.create" },
+                                { "action": "api::product.product.update" },
+                                { "action": "api::product.product.delete" }
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(perm_res.status(), StatusCode::OK);
+
+        // 3. End-User Registration (`/api/auth/local/register`), Login (`/api/auth/local`), and `/api/users/me`
+        let eu_reg = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/local/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "username": "alice_shopper",
+                            "email": "alice@shop.local",
+                            "password": "ShopperPassword123!"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(eu_reg.status(), StatusCode::OK);
+
+        let eu_login = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/local")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "identifier": "alice_shopper",
+                            "password": "ShopperPassword123!"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(eu_login.status(), StatusCode::OK);
+        let eu_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(eu_login.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let eu_jwt = eu_json["jwt"].as_str().unwrap().to_string();
+
+        let me_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/users/me")
+                    .header("authorization", format!("Bearer {eu_jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(me_res.status(), StatusCode::OK);
+
+        // 4. Dynamic Strapi v5 GraphQL (`createProduct`, `products_connection`, `product(documentId)`)
+        // First verify unauthenticated Public GraphQL query is denied
+        let unauth_gql = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/graphql")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "query": "query { products { documentId title } }"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let unauth_gql_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(unauth_gql.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert!(unauth_gql_json["errors"].is_array());
+
+        // Create via GraphQL mutation using End-User JWT
+        let gql_create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/graphql")
+                    .header("authorization", format!("Bearer {eu_jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "query": "mutation($d: JSON!) { createProduct(data: $d) { documentId title price } }",
+                            "variables": { "d": { "title": "Rust Handbook", "price": 45 } }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let gql_create_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(gql_create.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert!(gql_create_json.get("errors").is_none());
+        let created_doc_id = gql_create_json["data"]["createProduct"]["documentId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Query `<plural>_connection` and `<singular>(documentId)`
+        let gql_conn = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/graphql")
+                    .header("authorization", format!("Bearer {eu_jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "query": format!(
+                                "query {{ products_connection(sort: [\"price:asc\"]) {{ nodes {{ documentId title price }} pageInfo {{ total }} }} product(documentId: \"{created_doc_id}\") {{ title price }} }}"
+                            )
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let gql_conn_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(gql_conn.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(
+            gql_conn_json["data"]["products_connection"]["pageInfo"]["total"],
+            2
+        );
+        assert_eq!(
+            gql_conn_json["data"]["products_connection"]["nodes"][0]["title"],
+            "Starter Kit"
+        );
+        assert_eq!(gql_conn_json["data"]["product"]["title"], "Rust Handbook");
+
+        // 5. Forgot Password + Email Outbox verification
+        let forgot_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/forgot-password")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "email": "alice@shop.local" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(forgot_res.status(), StatusCode::OK);
+
+        let outbox_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/email/outbox")
+                    .header("authorization", format!("Bearer {admin_jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outbox_res.status(), StatusCode::OK);
+        let outbox_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(outbox_res.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert!(!outbox_json["data"].as_array().unwrap().is_empty());
+
+        // 6. Webhooks + HMAC-SHA256 Signed Test Trigger against ephemeral local HTTP receiver
+        let seen_sig = std::sync::Arc::new(tokio::sync::Mutex::new(String::new()));
+        let sig_clone = seen_sig.clone();
+        let hook_app = Router::new().route(
+            "/hook",
+            axum::routing::post(move |headers: axum::http::HeaderMap| {
+                let s = sig_clone.clone();
+                async move {
+                    if let Some(v) = headers.get("x-rapi-signature").and_then(|x| x.to_str().ok()) {
+                        *s.lock().await = v.to_string();
+                    }
+                    StatusCode::OK
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, hook_app).await;
+        });
+
+        let wh_create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/webhooks")
+                    .header("authorization", format!("Bearer {admin_jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "Local Receiver",
+                            "url": format!("http://{addr}/hook"),
+                            "events": ["entry.create", "entry.publish"],
+                            "secret": "whsec_unit_test_secret"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(wh_create.status(), StatusCode::OK);
+        let wh_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(wh_create.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(wh_json["data"]["hasSecret"], true);
+        let wh_id = wh_json["data"]["id"].as_str().unwrap().to_string();
+
+        let trig_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/admin/webhooks/{wh_id}/trigger"))
+                    .header("authorization", format!("Bearer {admin_jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(trig_res.status(), StatusCode::OK);
+        let trig_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(trig_res.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(trig_json["data"]["success"], true);
+        assert!(seen_sig.lock().await.starts_with("sha256="));
+
+        // 7. CSV Export & Import + Full JSON Bundle Export
+        let csv_imp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/data-transfer/import/csv/api%3A%3Aproduct.product")
+                    .header("authorization", format!("Bearer {admin_jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "csv": "title,price\n=DangerousFormula,99\nSafe Row,25\n"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(csv_imp.status(), StatusCode::OK);
+
+        let csv_exp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/data-transfer/export?format=csv&uid=api%3A%3Aproduct.product")
+                    .header("authorization", format!("Bearer {admin_jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(csv_exp.status(), StatusCode::OK);
+        let csv_text = String::from_utf8(
+            to_bytes(csv_exp.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        // Formula injection prefix `=` is escaped with leading `'`!
+        assert!(csv_text.contains("'=DangerousFormula"));
+
+        let bundle_exp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/data-transfer/export?format=json")
+                    .header("authorization", format!("Bearer {admin_jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bundle_exp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn phase6_security_and_graphql_regressions() {
+        let app = test_router().await;
+
+        let reg = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/register-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "email": "p6sec@rapi.dev",
+                            "password": "StrongPassword123!",
+                            "firstname": "P6Sec"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let jwt = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(reg.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap()["data"]["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Create SingleType `api::homepage.homepage`
+        let st = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/content-types")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "uid": "api::homepage.homepage",
+                            "kind": "singleType",
+                            "singularName": "homepage",
+                            "pluralName": "homepages",
+                            "displayName": "Homepage",
+                            "draftAndPublish": true,
+                            "fields": [
+                                { "name": "hero", "fieldType": "string", "required": true }
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(st.status(), StatusCode::OK);
+
+        // BUG-P6-01: SingleType GraphQL `updateHomepage` + `deleteHomepage`
+        let up_st = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/graphql")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "query": "mutation { updateHomepage(data: { hero: \"Welcome\" }) { documentId hero } }"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let up_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(up_st.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(up_json["data"]["updateHomepage"]["hero"], "Welcome");
+
+        let del_st = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/graphql")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "query": "mutation { deleteHomepage { documentId } }"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let del_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(del_st.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert!(del_json["data"]["deleteHomepage"]["documentId"].is_string());
+
+        // BUG-P6-05: Invalid locale in CSV import is rejected with 400
+        let bad_csv = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/data-transfer/import/csv/api%3A%3Ahomepage.homepage")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "csv": "locale,hero\nxx-invalid,Bad\n"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bad_csv.status(), StatusCode::BAD_REQUEST);
     }
 }

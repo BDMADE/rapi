@@ -247,6 +247,29 @@ impl AuthService {
         )
         .map_err(|_| ApiError::Unauthorized("Invalid or expired access token".to_string()))?;
 
+        if data.claims.typ == "end_user" {
+            let Some((email, role_id, blocked)) = self
+                .repo
+                .find_end_user_jwt_context(&data.claims.sub)
+                .await?
+            else {
+                return Err(ApiError::Unauthorized("End user not found".to_string()));
+            };
+            if blocked {
+                return Err(ApiError::Forbidden("End-user account is blocked".to_string()));
+            }
+            let permissions = self
+                .repo
+                .get_subject_permissions("user_role", &role_id)
+                .await?;
+            return Ok(Actor::EndUser {
+                user_id: data.claims.sub,
+                email,
+                role_id,
+                permissions,
+            });
+        }
+
         if data.claims.typ != "admin_access" {
             return Err(ApiError::Unauthorized("Invalid token type".to_string()));
         }
@@ -571,6 +594,46 @@ impl AuthService {
             .await
     }
 
+    pub async fn get_user_role_permissions(&self, role_id: &str) -> ApiResult<Vec<PermissionRule>> {
+        if role_id == "urole_public" {
+            return self.get_public_permissions().await;
+        }
+        self.repo
+            .get_subject_permissions("user_role", role_id)
+            .await
+    }
+
+    pub async fn update_user_role_permissions(
+        &self,
+        role_id: &str,
+        rules: &[PermissionRule],
+    ) -> ApiResult<Vec<PermissionRule>> {
+        if role_id == "urole_public" {
+            return self.update_public_permissions(rules).await;
+        }
+        self.repo
+            .replace_subject_permissions("user_role", role_id, rules)
+            .await
+    }
+
+    /// Issues a signed HS256 JWT (`typ: "end_user"`, 7-day default expiry matching Strapi users-permissions).
+    pub fn issue_end_user_jwt(&self, user_id: &str, email: &str) -> ApiResult<String> {
+        let now = Utc::now().timestamp() as usize;
+        let claims = AccessClaims {
+            sub: user_id.to_string(),
+            email: email.to_string(),
+            typ: "end_user".to_string(),
+            iat: now,
+            exp: now + (7 * 24 * 3600),
+        };
+        encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(self.config.jwt_secret.as_bytes()),
+        )
+        .map_err(|e| ApiError::Internal(format!("JWT encode failed: {e}")))
+    }
+
     // --- API Tokens & Admin Tokens ---
 
     pub async fn list_tokens(&self, is_admin_token: bool) -> ApiResult<Vec<ApiTokenDto>> {
@@ -678,7 +741,7 @@ impl AuthService {
     }
 }
 
-fn hash_password(password: &str) -> ApiResult<String> {
+pub(crate) fn hash_password(password: &str) -> ApiResult<String> {
     let salt = SaltString::generate(&mut OsRng);
     Argon2::default()
         .hash_password(password.as_bytes(), &salt)
@@ -686,7 +749,7 @@ fn hash_password(password: &str) -> ApiResult<String> {
         .map_err(|e| ApiError::Internal(format!("Password hashing failed: {e}")))
 }
 
-fn verify_password(password: &str, stored_hash: &str) -> ApiResult<bool> {
+pub(crate) fn verify_password(password: &str, stored_hash: &str) -> ApiResult<bool> {
     let parsed = PasswordHash::new(stored_hash)
         .map_err(|e| ApiError::Internal(format!("Invalid stored password hash: {e}")))?;
     Ok(Argon2::default()
@@ -694,19 +757,19 @@ fn verify_password(password: &str, stored_hash: &str) -> ApiResult<bool> {
         .is_ok())
 }
 
-fn random_hex_32() -> String {
+pub(crate) fn random_hex_32() -> String {
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
     hex::encode(bytes)
 }
 
-fn sha256_hex(input: &str) -> String {
+pub(crate) fn sha256_hex(input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     hex::encode(hasher.finalize())
 }
 
-fn validate_email(email: &str) -> ApiResult<()> {
+pub(crate) fn validate_email(email: &str) -> ApiResult<()> {
     let trimmed = email.trim();
     if trimmed.len() < 5 || !trimmed.contains('@') || !trimmed.contains('.') {
         return Err(ApiError::Validation {
@@ -717,7 +780,7 @@ fn validate_email(email: &str) -> ApiResult<()> {
     Ok(())
 }
 
-fn validate_password(password: &str) -> ApiResult<()> {
+pub(crate) fn validate_password(password: &str) -> ApiResult<()> {
     if password.len() < 8 {
         return Err(ApiError::Validation {
             message: "Password must be at least 8 characters long".into(),

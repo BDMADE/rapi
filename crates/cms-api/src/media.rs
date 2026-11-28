@@ -74,7 +74,7 @@ pub fn media_routes() -> Router<ServiceContainer> {
 
 fn actor_id(actor: &Actor) -> Option<String> {
     match actor {
-        Actor::AdminUser { user_id, .. } => Some(user_id.clone()),
+        Actor::AdminUser { user_id, .. } | Actor::EndUser { user_id, .. } => Some(user_id.clone()),
         Actor::AdminToken { token_id, .. } | Actor::ApiToken { token_id, .. } => {
             Some(token_id.clone())
         }
@@ -174,6 +174,14 @@ async fn parse_and_store_multipart(
                 actor.clone(),
             )
             .await?;
+        services
+            .integrations
+            .emit_webhook_event(
+                "media.create",
+                Some("plugin::upload.file"),
+                serde_json::to_value(&dto).unwrap_or_default(),
+            )
+            .await;
         uploaded.push(dto);
     }
     Ok(uploaded)
@@ -240,6 +248,14 @@ async fn public_delete_file_handler(
         .media
         .delete_file(id, q.force.unwrap_or(false))
         .await?;
+    services
+        .integrations
+        .emit_webhook_event(
+            "media.delete",
+            Some("plugin::upload.file"),
+            serde_json::to_value(&deleted).unwrap_or_default(),
+        )
+        .await;
     Ok(Json(deleted))
 }
 
@@ -321,6 +337,14 @@ async fn admin_delete_file_handler(
 ) -> Result<Json<ApiResponse<MediaFileDto>>, HttpApiError> {
     enforce_permission(&actor, "plugin::upload.assets.create", None)?;
     let deleted = services.media.delete_file(id, q.force.unwrap_or(false)).await?;
+    services
+        .integrations
+        .emit_webhook_event(
+            "media.delete",
+            Some("plugin::upload.file"),
+            serde_json::to_value(&deleted).unwrap_or_default(),
+        )
+        .await;
     Ok(Json(ApiResponse::new(deleted)))
 }
 
