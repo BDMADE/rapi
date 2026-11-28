@@ -2,6 +2,7 @@ pub mod auth;
 pub mod config;
 pub mod content;
 pub mod error;
+pub mod governance;
 pub mod id;
 pub mod media;
 pub mod models;
@@ -16,6 +17,11 @@ pub use auth::{
 pub use content::{
     ContentVersionDto, DocumentQuery, PopulateFieldOpts, PopulateSpec, RelationConnectItem,
     RelationMutation, RelationPosition, SortSpec,
+};
+pub use governance::{
+    validate_locale_code, validate_preview_url_template, AuditLogDto, AuditLogFilter,
+    DocumentLocaleStateDto, LocaleDto, PreviewConfigDto, ReleaseDto, ReleaseEntryDto,
+    ResolvedPreviewDto, WorkflowEntryDto, WorkflowStageDto,
 };
 pub use media::{
     sanitize_filename, validate_storage_key, LocalDiskProvider, MediaFileDto, MediaFolderDto,

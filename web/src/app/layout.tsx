@@ -4,18 +4,23 @@ import {
   Blocks,
   ChevronDown,
   Database,
+  Eye,
   FolderOpen,
+  GitPullRequest,
   Globe,
   KeyRound,
   LayoutDashboard,
   LogOut,
   PanelLeftClose,
   PanelLeftOpen,
+  Rocket,
+  ScrollText,
   Search,
   Settings,
   ShieldCheck,
   Webhook,
 } from "lucide-react";
+import { useEffect } from "react";
 import { Link, Navigate, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useUiStore } from "@/app/store";
 import { Badge } from "@/components/ui/badge";
@@ -31,21 +36,25 @@ const NAV_GROUPS = [
       { label: "Overview", to: "/", icon: LayoutDashboard, end: true },
       { label: "Content Manager", to: "/content-manager", icon: Database },
       { label: "Media Library", to: "/media-library", icon: FolderOpen },
+      { label: "Releases", to: "/settings/releases", icon: Rocket },
     ],
   },
   {
-    title: "Architecture",
+    title: "Architecture & Governance",
     items: [
       { label: "Content-Type Builder", to: "/content-type-builder", icon: Blocks },
       { label: "Roles & Access", to: "/users", icon: ShieldCheck },
+      { label: "Review Workflows", to: "/settings/workflows", icon: GitPullRequest },
+      { label: "Audit Logs", to: "/settings/audit-logs", icon: ScrollText },
     ],
   },
   {
     title: "Configuration",
     items: [
       { label: "API Tokens", to: "/settings/api-tokens", icon: KeyRound },
-      { label: "Webhooks", to: "/settings/webhooks", icon: Webhook },
       { label: "Locales (i18n)", to: "/settings/i18n", icon: Globe },
+      { label: "Live Preview", to: "/settings/preview", icon: Eye },
+      { label: "Webhooks", to: "/settings/webhooks", icon: Webhook },
       { label: "Platform Settings", to: "/settings/general", icon: Settings },
     ],
   },
@@ -70,6 +79,21 @@ export function AppLayout() {
     queryFn: api.getAdminInit,
     retry: 1,
   });
+
+  const localesQuery = useQuery({
+    queryKey: ["locales"],
+    queryFn: api.listLocales,
+    enabled: Boolean(token),
+  });
+
+  const configuredLocales = localesQuery.data ?? [];
+
+  useEffect(() => {
+    if (configuredLocales.length > 0 && !configuredLocales.some((l) => l.code === activeLocale)) {
+      const def = configuredLocales.find((l) => l.isDefault) ?? configuredLocales[0];
+      if (def) setActiveLocale(def.code);
+    }
+  }, [configuredLocales, activeLocale, setActiveLocale]);
 
   if (initQuery.isSuccess && !initQuery.data.hasAdmin) {
     return <Navigate to="/onboarding" replace />;
@@ -228,16 +252,19 @@ export function AppLayout() {
                 <DropdownMenu.Content
                   align="end"
                   sideOffset={6}
-                  className="z-50 min-w-36 rounded-md border border-zinc-200 bg-white p-1 shadow-md"
+                  className="z-50 min-w-44 rounded-md border border-zinc-200 bg-white p-1 shadow-md"
                 >
-                  {["en", "fr", "de", "bn"].map((loc) => (
+                  {(configuredLocales.length > 0
+                    ? configuredLocales
+                    : [{ id: 1, code: "en", name: "English (en)", isDefault: true }]
+                  ).map((loc) => (
                     <DropdownMenu.Item
-                      key={loc}
-                      onSelect={() => setActiveLocale(loc)}
-                      className="flex cursor-pointer items-center justify-between rounded px-2 py-1.5 text-xs text-zinc-700 outline-none hover:bg-indigo-50 hover:text-indigo-900"
+                      key={loc.code}
+                      onSelect={() => setActiveLocale(loc.code)}
+                      className="flex cursor-pointer items-center justify-between gap-3 rounded px-2 py-1.5 text-xs text-zinc-700 outline-none hover:bg-indigo-50 hover:text-indigo-900"
                     >
-                      <span>Locale</span>
-                      <span className="font-mono font-medium">{loc}</span>
+                      <span className="truncate">{loc.name}</span>
+                      <span className="font-mono font-medium">{loc.code}</span>
                     </DropdownMenu.Item>
                   ))}
                 </DropdownMenu.Content>
