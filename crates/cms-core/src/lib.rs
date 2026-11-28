@@ -2,6 +2,7 @@ pub mod auth;
 pub mod config;
 pub mod content;
 pub mod error;
+pub mod extensibility;
 pub mod governance;
 pub mod id;
 pub mod integrations;
@@ -42,6 +43,10 @@ pub use schema::{
 
 pub use config::AppConfig;
 pub use error::{ApiError, ApiResult, ErrorBody, ErrorEnvelope};
+pub use extensibility::{
+    AiCompletionOutputDto, AiSettingsDto, CustomFieldDto, InstalledPluginDto, MarketplacePluginDto,
+    McpToolDescriptor, PublicSsoProviderDto, SsoProviderDto,
+};
 pub use id::DocumentId;
 pub use models::{ContentKind, DocumentStatus, PlatformStats};
 pub use response::{ApiResponse, PaginationMeta, ResponseMeta};

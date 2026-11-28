@@ -103,6 +103,11 @@ export function ContentTypeBuilderPage() {
     queryFn: api.listSchemas,
   });
 
+  const customFieldsQuery = useQuery({
+    queryKey: ["custom-fields"],
+    queryFn: api.listCustomFields,
+  });
+
   const allSchemas = useMemo(() => {
     if (!catalogQuery.data) return [];
     return [...catalogQuery.data.contentTypes, ...catalogQuery.data.components];
@@ -248,6 +253,7 @@ export function ContentTypeBuilderPage() {
   const [fCompUid, setFCompUid] = useState("");
   const [fCompRepeatable, setFCompRepeatable] = useState(false);
   const [fDzComponents, setFDzComponents] = useState<Set<string>>(new Set());
+  const [fCustomFieldUid, setFCustomFieldUid] = useState("global::color-picker");
 
   const openAddField = () => {
     setEditingIndex(null);
@@ -268,6 +274,7 @@ export function ContentTypeBuilderPage() {
     setFCompUid(catalogQuery.data?.components[0]?.uid ?? "");
     setFCompRepeatable(false);
     setFDzComponents(new Set(catalogQuery.data?.components.slice(0, 1).map((c) => c.uid) ?? []));
+    setFCustomFieldUid(customFieldsQuery.data?.[0]?.uid ?? "global::color-picker");
     setFieldOpen(true);
   };
 
@@ -290,6 +297,7 @@ export function ContentTypeBuilderPage() {
     setFCompUid(f.component?.componentUid ?? "");
     setFCompRepeatable(Boolean(f.component?.repeatable));
     setFDzComponents(new Set(f.component?.components ?? []));
+    setFCustomFieldUid(f.customFieldUid ?? "global::color-picker");
     setFieldOpen(true);
   };
 
@@ -350,6 +358,7 @@ export function ContentTypeBuilderPage() {
           : fType === "dynamiczone"
             ? { components: Array.from(fDzComponents) }
             : undefined,
+      customFieldUid: fType === "custom" ? fCustomFieldUid : undefined,
     };
 
     const nextFields = [...draft.fields];
@@ -682,6 +691,22 @@ export function ContentTypeBuilderPage() {
               </div>
             )}
 
+            {fType === "custom" && (
+              <div className="rounded border border-zinc-200 bg-zinc-50 p-3">
+                <label className="mb-1 block text-xs font-medium text-zinc-700">
+                  Registered Custom Field
+                </label>
+                <Select
+                  value={fCustomFieldUid}
+                  onValueChange={setFCustomFieldUid}
+                  options={(customFieldsQuery.data ?? []).map((cf) => ({
+                    value: cf.uid,
+                    label: `${cf.name} (${cf.uid})`,
+                  }))}
+                />
+              </div>
+            )}
+
             {(fType === "string" || fType === "text") && (
               <div className="grid grid-cols-3 gap-2.5">
                 <div>
@@ -1003,6 +1028,9 @@ export function ContentTypeBuilderPage() {
                                 <Badge tone="mono">
                                   [{f.validation.enumValues.join(", ")}]
                                 </Badge>
+                              )}
+                              {f.customFieldUid && (
+                                <Badge tone="mono">{f.customFieldUid}</Badge>
                               )}
                             </div>
                           ),

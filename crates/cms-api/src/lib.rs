@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod content;
 pub mod error;
+pub mod extensibility;
 pub mod governance;
 pub mod graphql;
 pub mod integrations;

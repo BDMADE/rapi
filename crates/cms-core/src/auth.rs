@@ -410,6 +410,30 @@ pub fn builtin_permission_catalog() -> Vec<PermissionCatalogItem> {
             category: "Users & Permissions".into(),
             description: "Create, block/unblock, delete end-users, and edit user role permissions.".into(),
         },
+        PermissionCatalogItem {
+            action: "admin::plugins.manage".into(),
+            label: "Manage plugins & custom fields".into(),
+            category: "Extensibility".into(),
+            description: "Install/toggle WASM plugins, invoke plugin hooks, and register custom fields.".into(),
+        },
+        PermissionCatalogItem {
+            action: "admin::sso.update".into(),
+            label: "Configure OIDC Single Sign-On".into(),
+            category: "Extensibility".into(),
+            description: "Manage OpenID Connect identity providers and role mappings.".into(),
+        },
+        PermissionCatalogItem {
+            action: "admin::ai.use".into(),
+            label: "Configure & use AI assistant".into(),
+            category: "Extensibility".into(),
+            description: "Enable opt-in AI providers and run field translation or draft generation.".into(),
+        },
+        PermissionCatalogItem {
+            action: "admin::mcp.execute".into(),
+            label: "Execute MCP tools".into(),
+            category: "Extensibility".into(),
+            description: "Invoke Model Context Protocol (MCP) content, schema, and media tools.".into(),
+        },
     ]
 }
 

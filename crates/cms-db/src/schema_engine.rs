@@ -19,6 +19,16 @@ impl SchemaEngine {
         Self { pools }
     }
 
+    pub async fn custom_field_exists(&self, uid: &str) -> ApiResult<bool> {
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM custom_fields WHERE uid = ?")
+                .bind(uid)
+                .fetch_one(&self.pools.reader)
+                .await
+                .map_err(|e| ApiError::Internal(format!("check custom_field_exists failed: {e}")))?;
+        Ok(count > 0)
+    }
+
     pub async fn list_schemas(&self) -> ApiResult<Vec<ContentTypeSchema>> {
         let rows = sqlx::query(
             r#"

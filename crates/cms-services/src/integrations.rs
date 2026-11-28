@@ -1270,7 +1270,7 @@ fn is_reserved_webhook_header(name: &str) -> bool {
     )
 }
 
-async fn verify_webhook_dns_not_private(raw_url: &str) -> ApiResult<()> {
+pub(crate) async fn verify_webhook_dns_not_private(raw_url: &str) -> ApiResult<()> {
     let rest = raw_url
         .trim()
         .strip_prefix("https://")

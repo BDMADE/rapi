@@ -1,10 +1,11 @@
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use cms_api::build_router;
-use cms_core::AppConfig;
+use cms_core::{Actor, AppConfig};
 use cms_db::{DbPools, PlatformRepository};
 use cms_services::ServiceContainer;
 use cms_worker::WorkerRunner;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tracing::info;
@@ -33,15 +34,16 @@ enum Commands {
     Seed,
     /// Print active runtime info and platform database statistics
     Info,
+    /// Start a stdio JSON-RPC 2.0 Model Context Protocol (MCP) server for AI assistants
+    Mcp,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = AppConfig::from_env();
-    init_tracing(&config.log_format);
-
     let cli = Cli::parse();
     let command = cli.command.unwrap_or(Commands::Serve { no_worker: false });
+    init_tracing(&config.log_format, matches!(command, Commands::Mcp));
 
     match command {
         Commands::Migrate => {
@@ -78,6 +80,45 @@ async fn main() -> anyhow::Result<()> {
                 .await
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
             println!("{}", serde_json::to_string_pretty(&overview)?);
+        }
+        Commands::Mcp => {
+            let services = ServiceContainer::bootstrap(config)
+                .await
+                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            let mcp_actor = Actor::AdminUser {
+                user_id: "cli_mcp_super_admin".into(),
+                email: "mcp@rapi.local".into(),
+                is_super_admin: true,
+                role_ids: vec!["role_super_admin".into()],
+                permissions: vec![],
+            };
+            let stdin = BufReader::new(tokio::io::stdin());
+            let mut lines = stdin.lines();
+            let mut stdout = tokio::io::stdout();
+
+            while let Some(line) = lines.next_line().await? {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let out_json = match serde_json::from_str::<serde_json::Value>(trimmed) {
+                    Ok(req) => services.extensibility.handle_mcp_rpc(&mcp_actor, req).await,
+                    Err(e) => Some(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": null,
+                        "error": {
+                            "code": -32700,
+                            "message": format!("Parse error: {e}")
+                        }
+                    })),
+                };
+                if let Some(resp) = out_json {
+                    let serialized = serde_json::to_string(&resp)?;
+                    stdout.write_all(serialized.as_bytes()).await?;
+                    stdout.write_all(b"\n").await?;
+                    stdout.flush().await?;
+                }
+            }
         }
         Commands::Worker => {
             let services = ServiceContainer::bootstrap(config)
@@ -136,11 +177,17 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn init_tracing(format: &str) {
+fn init_tracing(format: &str, force_stderr: bool) {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,cms_api=debug,cms_db=info"));
 
-    if format.eq_ignore_ascii_case("json") {
+    if force_stderr {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .compact()
+            .init();
+    } else if format.eq_ignore_ascii_case("json") {
         tracing_subscriber::fmt()
             .with_env_filter(filter)
             .json()
