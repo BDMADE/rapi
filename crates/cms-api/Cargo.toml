@@ -8,6 +8,10 @@ license.workspace = true
 cms-core.workspace = true
 cms-services.workspace = true
 axum.workspace = true
+async-graphql.workspace = true
+arc-swap.workspace = true
+futures-util.workspace = true
+tokio.workspace = true
 tower.workspace = true
 tower-http.workspace = true
 serde.workspace = true
@@ -19,3 +23,5 @@ utoipa.workspace = true
 [dev-dependencies]
 tokio.workspace = true
 cms-db.workspace = true
+image.workspace = true
+uuid.workspace = true

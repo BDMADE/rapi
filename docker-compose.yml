@@ -4,31 +4,46 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "1337:1337"
+      - "127.0.0.1:1337:1337"
     environment:
+      RAPI_ENV: production
       RAPI_HOST: 0.0.0.0
       RAPI_PORT: 1337
       DATABASE_URL: sqlite:///app/data/rapi.db?mode=rwc
-      REDIS_URL: redis://redis:6379
-      JWT_SECRET: ${JWT_SECRET:-change-me-in-production-32-bytes-minimum}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379
+      JWT_SECRET: ${JWT_SECRET:?Set a strong 32+ character JWT_SECRET in .env}
       LOG_FORMAT: json
+      ENABLE_DOCS: "false"
     volumes:
       - rapi_data:/app/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       redis:
         condition: service_healthy
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}"]
+    # Keep Redis internal to the Compose network (do not expose unauthenticated on host 0.0.0.0)
     volumes:
       - redis_data:/data
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
       interval: 5s
       timeout: 3s
       retries: 5
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
 
 volumes:
   rapi_data:

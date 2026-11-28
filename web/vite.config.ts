@@ -17,8 +17,10 @@ export default defineConfig({
     proxy: {
       "/api": backendTarget,
       "/admin": backendTarget,
+      "/uploads": backendTarget,
       "/health": backendTarget,
       "/ready": backendTarget,
+      "/docs": backendTarget,
       "/openapi.json": backendTarget,
       "/graphql": backendTarget,
     },
