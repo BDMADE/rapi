@@ -3189,4 +3189,132 @@ mod tests {
             .unwrap();
         assert_eq!(bundle_exp.status(), StatusCode::OK);
     }
+
+    #[tokio::test]
+    async fn phase6_security_and_graphql_regressions() {
+        let app = test_router().await;
+
+        let reg = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/register-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "email": "p6sec@rapi.dev",
+                            "password": "StrongPassword123!",
+                            "firstname": "P6Sec"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let jwt = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(reg.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap()["data"]["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Create SingleType `api::homepage.homepage`
+        let st = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/content-types")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "uid": "api::homepage.homepage",
+                            "kind": "singleType",
+                            "singularName": "homepage",
+                            "pluralName": "homepages",
+                            "displayName": "Homepage",
+                            "draftAndPublish": true,
+                            "fields": [
+                                { "name": "hero", "fieldType": "string", "required": true }
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(st.status(), StatusCode::OK);
+
+        // BUG-P6-01: SingleType GraphQL `updateHomepage` + `deleteHomepage`
+        let up_st = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/graphql")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "query": "mutation { updateHomepage(data: { hero: \"Welcome\" }) { documentId hero } }"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let up_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(up_st.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(up_json["data"]["updateHomepage"]["hero"], "Welcome");
+
+        let del_st = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/graphql")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "query": "mutation { deleteHomepage { documentId } }"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let del_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(del_st.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert!(del_json["data"]["deleteHomepage"]["documentId"].is_string());
+
+        // BUG-P6-05: Invalid locale in CSV import is rejected with 400
+        let bad_csv = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/data-transfer/import/csv/api%3A%3Ahomepage.homepage")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "csv": "locale,hero\nxx-invalid,Bad\n"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bad_csv.status(), StatusCode::BAD_REQUEST);
+    }
 }

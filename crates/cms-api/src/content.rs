@@ -677,6 +677,10 @@ async fn admin_unpublish_handler(
         .content
         .unpublish_entry(&uid, &document_id, &locale)
         .await?;
+    services
+        .integrations
+        .emit_webhook_event("entry.unpublish", Some(&uid), doc.clone())
+        .await;
     Ok(Json(ApiResponse::new(doc)))
 }
 

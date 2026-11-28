@@ -62,6 +62,14 @@ impl ContentService {
         self.repo.find_many(schema, query, true).await
     }
 
+    pub async fn find_many_admin_raw(
+        &self,
+        schema: &ContentTypeSchema,
+        query: &DocumentQuery,
+    ) -> ApiResult<(Vec<serde_json::Value>, PaginationMeta)> {
+        self.repo.find_many(schema, query, false).await
+    }
+
     pub async fn find_admin_entries(
         &self,
         uid: &str,

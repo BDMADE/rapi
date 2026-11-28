@@ -212,7 +212,11 @@ async fn build_dynamic_schema(services: &ServiceContainer) -> ApiResult<Schema> 
 
     let mut builder = Schema::build("Query", Some("Mutation"), None)
         .limit_depth(12)
-        .limit_complexity(500)
+        .limit_complexity(500);
+    if !services.config.enable_docs {
+        builder = builder.disable_introspection();
+    }
+    builder = builder
         .register(Scalar::new("JSON"))
         .register(Scalar::new("DateTime"))
         .register(Scalar::new("Date"))
@@ -738,6 +742,35 @@ async fn build_dynamic_schema(services: &ServiceContainer) -> ApiResult<Schema> 
                             .resolve_and_validate_locale(s.i18n_enabled, req_loc.as_deref(), true)
                             .await
                             .map_err(api_err_to_gql)?;
+                        if s.draft_and_publish && target_status == DocumentStatus::Published {
+                            if let Some(existing) = svc
+                                .content
+                                .find_single(
+                                    &s,
+                                    &locale,
+                                    DocumentStatus::Draft,
+                                    &PopulateSpec::None,
+                                    &[],
+                                    false,
+                                )
+                                .await
+                                .map_err(api_err_to_gql)?
+                            {
+                                if let Some(did) =
+                                    existing.get("documentId").and_then(|v| v.as_str())
+                                {
+                                    svc.governance
+                                        .enforce_publish_workflow_gate(did, &locale)
+                                        .await
+                                        .map_err(api_err_to_gql)?;
+                                }
+                            } else {
+                                svc.governance
+                                    .enforce_new_entry_publish_gate()
+                                    .await
+                                    .map_err(api_err_to_gql)?;
+                            }
+                        }
                         let updated = svc
                             .content
                             .upsert_single(
@@ -761,6 +794,60 @@ async fn build_dynamic_schema(services: &ServiceContainer) -> ApiResult<Schema> 
             .argument(InputValue::new("status", TypeRef::named(TypeRef::STRING)))
             .argument(InputValue::new("locale", TypeRef::named(TypeRef::STRING)));
             mutation_root = mutation_root.field(single_up);
+
+            // SingleType `delete<PascalSingular>(locale)`
+            let sd_schema = schema.clone();
+            let sd_svc = services.clone();
+            let single_del = Field::new(
+                format!("delete{type_name}"),
+                TypeRef::named_nn("DeleteMutationResponse"),
+                move |ctx| {
+                    let s = sd_schema.clone();
+                    let svc = sd_svc.clone();
+                    FieldFuture::new(async move {
+                        let actor = ctx.data::<Actor>()?;
+                        enforce_gql_perm(actor, &format!("{}.delete", s.uid), Some(&s.uid))?;
+                        let req_loc = ctx
+                            .args
+                            .get("locale")
+                            .and_then(|v| v.string().ok().map(String::from));
+                        let locale = svc
+                            .governance
+                            .resolve_and_validate_locale(s.i18n_enabled, req_loc.as_deref(), false)
+                            .await
+                            .map_err(api_err_to_gql)?;
+                        let check_status = if s.draft_and_publish {
+                            DocumentStatus::Draft
+                        } else {
+                            DocumentStatus::Published
+                        };
+                        let existing = svc
+                            .content
+                            .find_single(&s, &locale, check_status, &PopulateSpec::None, &[], false)
+                            .await
+                            .map_err(api_err_to_gql)?
+                            .ok_or_else(|| GqlError::new("Single type document not found"))?;
+                        let doc_id = existing["documentId"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string();
+                        svc.content
+                            .delete_entry(&s, &doc_id, req_loc.as_deref())
+                            .await
+                            .map_err(api_err_to_gql)?;
+                        svc.integrations
+                            .emit_webhook_event(
+                                "entry.delete",
+                                Some(&s.uid),
+                                serde_json::json!({ "documentId": doc_id }),
+                            )
+                            .await;
+                        Ok(Some(FieldValue::owned_any(doc_id)))
+                    })
+                },
+            )
+            .argument(InputValue::new("locale", TypeRef::named(TypeRef::STRING)));
+            mutation_root = mutation_root.field(single_del);
         }
     }
 

@@ -563,6 +563,9 @@ impl IntegrationsService {
             .ok_or_else(|| ApiError::NotFound(format!("Webhook '{webhook_id}' not found")))?;
 
         validate_webhook_url(&wh.dto.url, self.config.is_production())?;
+        if self.config.is_production() {
+            verify_webhook_dns_not_private(&wh.dto.url).await?;
+        }
 
         let raw_body = serde_json::to_string(body_val).unwrap_or_else(|_| "{}".to_string());
         let mut req = self
@@ -573,8 +576,9 @@ impl IntegrationsService {
             .header("X-Rapi-Event", event);
 
         for (hk, hv) in &wh.dto.headers {
-            if !hk.trim().is_empty() {
-                req = req.header(hk.trim(), hv.trim());
+            let clean_k = hk.trim();
+            if !clean_k.is_empty() && !is_reserved_webhook_header(clean_k) {
+                req = req.header(clean_k, hv.trim());
             }
         }
 
@@ -869,7 +873,7 @@ impl IntegrationsService {
                         populate: PopulateSpec::None,
                         ..Default::default()
                     };
-                    if let Ok((rows, _)) = self.content.find_many_public(schema, &query).await {
+                    if let Ok((rows, _)) = self.content.find_many_admin_raw(schema, &query).await {
                         for r in rows {
                             if let Some(mut obj) = r.as_object().cloned() {
                                 let doc_id = obj
@@ -1148,10 +1152,14 @@ impl IntegrationsService {
             }
 
             if !data_map.is_empty() {
+                let validated_locale = self
+                    .governance
+                    .resolve_and_validate_locale(schema.i18n_enabled, Some(&row_locale), true)
+                    .await?;
                 self.content
                     .create_entry(
                         &schema,
-                        &row_locale,
+                        &validated_locale,
                         target_status,
                         &data_map,
                         actor_id,
@@ -1249,6 +1257,60 @@ impl IntegrationsService {
 // ============================================================================
 // Internal Helpers
 // ============================================================================
+
+fn is_reserved_webhook_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "host"
+            | "content-length"
+            | "transfer-encoding"
+            | "x-rapi-signature"
+            | "x-rapi-event"
+            | "x-strapi-event"
+    )
+}
+
+async fn verify_webhook_dns_not_private(raw_url: &str) -> ApiResult<()> {
+    let rest = raw_url
+        .trim()
+        .strip_prefix("https://")
+        .or_else(|| raw_url.trim().strip_prefix("http://"))
+        .unwrap_or("");
+    let default_port: u16 = if raw_url.trim().starts_with("https://") {
+        443
+    } else {
+        80
+    };
+    let authority = rest.split('/').next().unwrap_or("");
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    let lookup_target = if host_port.contains(':') {
+        host_port.to_string()
+    } else {
+        format!("{host_port}:{default_port}")
+    };
+
+    let addrs = tokio::net::lookup_host(&lookup_target).await.map_err(|e| {
+        ApiError::BadRequest(format!("Webhook DNS resolution failed for '{host_port}': {e}"))
+    })?;
+    for sock in addrs {
+        let blocked = match sock.ip() {
+            std::net::IpAddr::V4(v4) => {
+                v4.is_loopback()
+                    || v4.is_private()
+                    || v4.is_link_local()
+                    || v4.is_unspecified()
+                    || v4.octets()[0] == 0
+            }
+            std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
+        };
+        if blocked {
+            return Err(ApiError::BadRequest(
+                "Webhook host resolves to a private, loopback, or link-local IP address".into(),
+            ));
+        }
+    }
+    Ok(())
+}
 
 fn validate_username(username: &str) -> ApiResult<()> {
     let t = username.trim();

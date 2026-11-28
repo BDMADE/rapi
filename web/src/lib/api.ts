@@ -1403,12 +1403,17 @@ export const api = {
       .data,
 
   exportCsvText: async (uid: string, locale?: string) => {
-    const token = useAuthStore.getState().token;
     const qs = new URLSearchParams({ format: "csv", uid });
     if (locale) qs.set("locale", locale);
-    const res = await fetch(`${API_BASE}/admin/data-transfer/export?${qs.toString()}`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    });
+    const runFetch = (token: string | null) =>
+      fetch(`${API_BASE}/admin/data-transfer/export?${qs.toString()}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+    let res = await runFetch(useAuthStore.getState().token);
+    if (res.status === 401) {
+      const refreshed = await tryRefreshSession();
+      if (refreshed) res = await runFetch(refreshed);
+    }
     if (!res.ok) throw new Error(`CSV export failed (HTTP ${res.status})`);
     return res.text();
   },
