@@ -525,6 +525,67 @@ impl GovernanceService {
             });
         }
 
+        // Pre-flight validation pass over ALL entries so a failure on entry N never leaves entries 1..N-1 partially published!
+        for entry in &release.entries {
+            let preflight: ApiResult<()> = async {
+                let schema = self.schema_service.get_schema(&entry.content_type_uid).await?;
+                if entry.action == "publish" {
+                    self.enforce_publish_workflow_gate(&entry.document_id, &entry.locale)
+                        .await?;
+                    if schema.draft_and_publish {
+                        let draft = self
+                            .content_service
+                            .find_one(
+                                &schema,
+                                &entry.document_id,
+                                &entry.locale,
+                                DocumentStatus::Draft,
+                                &PopulateSpec::None,
+                                &[],
+                                false,
+                            )
+                            .await?;
+                        if let Some(obj) = draft.as_object() {
+                            for f in schema
+                                .fields
+                                .iter()
+                                .filter(|f| f.field_type.has_physical_column() && f.required)
+                            {
+                                let missing = match obj.get(&f.name) {
+                                    None | Some(serde_json::Value::Null) => true,
+                                    Some(serde_json::Value::String(s)) => s.trim().is_empty(),
+                                    _ => false,
+                                };
+                                if missing {
+                                    return Err(ApiError::Validation {
+                                        message: format!(
+                                            "Required field '{}' is empty on draft",
+                                            f.name
+                                        ),
+                                        details: serde_json::json!({ "field": f.name }),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
+            .await;
+
+            if let Err(err) = preflight {
+                let err_msg = format!(
+                    "Pre-flight failed on {} ({}): {}",
+                    entry.document_id, entry.locale, err
+                );
+                let _ = self
+                    .repo
+                    .mark_release_status(release_id, "failed", Some(&err_msg))
+                    .await;
+                return Err(err);
+            }
+        }
+
         for entry in &release.entries {
             let step_res = if entry.action == "unpublish" {
                 self.content_service
@@ -532,23 +593,15 @@ impl GovernanceService {
                     .await
                     .map(|_| ())
             } else {
-                // Enforce workflow publish gate if configured!
-                if let Err(gate_err) = self
-                    .enforce_publish_workflow_gate(&entry.document_id, &entry.locale)
+                self.content_service
+                    .publish_entry(
+                        &entry.content_type_uid,
+                        &entry.document_id,
+                        &entry.locale,
+                        actor_id,
+                    )
                     .await
-                {
-                    Err(gate_err)
-                } else {
-                    self.content_service
-                        .publish_entry(
-                            &entry.content_type_uid,
-                            &entry.document_id,
-                            &entry.locale,
-                            actor_id,
-                        )
-                        .await
-                        .map(|_| ())
-                }
+                    .map(|_| ())
             };
 
             if let Err(err) = step_res {
@@ -713,6 +766,26 @@ impl GovernanceService {
         self.repo
             .upsert_workflow_entry(document_id, &loc, &target_stage.id, clean_assignee)
             .await
+    }
+
+    /// Blocks direct creation as `status=published` whenever a review workflow publish gate is active.
+    pub async fn enforce_new_entry_publish_gate(&self) -> ApiResult<()> {
+        let stages = self.repo.list_workflow_stages().await?;
+        let required_stages: Vec<&str> = stages
+            .iter()
+            .filter(|s| s.require_for_publish)
+            .map(|s| s.name.as_str())
+            .collect();
+        if required_stages.is_empty() {
+            return Ok(());
+        }
+        Err(ApiError::Validation {
+            message: format!(
+                "Review workflow gate active: create as draft first and advance to [{}] before publishing",
+                required_stages.join(" / ")
+            ),
+            details: serde_json::json!({ "requiredStages": required_stages }),
+        })
     }
 
     /// Checks whether any workflow stage has `require_for_publish == true`. If so, verifies that

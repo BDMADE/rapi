@@ -247,6 +247,31 @@ export function EntryEditorPage() {
     };
   }, [previewOpen, authToken, resolvedDocId]);
 
+  // Automatically keep the split Live Preview iframe synchronized when switching locales
+  useEffect(() => {
+    if (!previewOpen || !uid || !resolvedDocId) return;
+    let cancelled = false;
+    api
+      .resolvePreviewUrl(
+        uid,
+        resolvedDocId,
+        activeLocale,
+        schema?.draftAndPublish ? "draft" : "published",
+      )
+      .then((resolved) => {
+        if (cancelled) return;
+        const finalUrl =
+          resolved.isBuiltin && authToken
+            ? `${resolved.url}&token=${encodeURIComponent(authToken)}`
+            : resolved.url;
+        setPreviewUrl(finalUrl);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [previewOpen, uid, resolvedDocId, activeLocale, authToken, schema?.draftAndPublish]);
+
   const setField = (name: string, val: unknown) => {
     setFormValues((prev) => ({ ...prev, [name]: val }));
   };

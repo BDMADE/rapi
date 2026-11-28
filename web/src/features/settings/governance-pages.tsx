@@ -1,9 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  ArrowDown,
+  ArrowUp,
   CalendarClock,
   CheckCircle2,
-  Plus,
   Play,
+  Plus,
   Rocket,
   ShieldAlert,
   Star,
@@ -440,6 +442,8 @@ export function ReleasesPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [name, setName] = useState("");
   const [scheduledLocal, setScheduledLocal] = useState("");
+  const [rescheduleId, setRescheduleId] = useState<string | null>(null);
+  const [rescheduleLocal, setRescheduleLocal] = useState("");
 
   const createMut = useMutation({
     mutationFn: () => {
@@ -459,6 +463,24 @@ export function ReleasesPage() {
     },
     onError: (e: Error) =>
       pushToast({ title: "Create failed", description: e.message, tone: "error" }),
+  });
+
+  const rescheduleMut = useMutation({
+    mutationFn: () => {
+      const scheduledAt = rescheduleLocal ? new Date(rescheduleLocal).toISOString() : null;
+      return api.updateRelease(rescheduleId!, {
+        scheduledAt,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["releases"] });
+      setRescheduleId(null);
+      setRescheduleLocal("");
+      pushToast({ title: "Release schedule updated", tone: "success" });
+    },
+    onError: (e: Error) =>
+      pushToast({ title: "Reschedule failed", description: e.message, tone: "error" }),
   });
 
   const publishReleaseMut = useMutation({
@@ -549,14 +571,29 @@ export function ReleasesPage() {
                 </div>
                 <div className="flex items-center gap-2">
                   {rel.status !== "done" && (
-                    <Button
-                      size="sm"
-                      disabled={rel.entryCount === 0 || publishReleaseMut.isPending}
-                      onClick={() => publishReleaseMut.mutate(rel.id)}
-                    >
-                      <Play className="h-3.5 w-3.5" />
-                      Publish now
-                    </Button>
+                    <>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => {
+                          setRescheduleId(rel.id);
+                          setRescheduleLocal(
+                            rel.scheduledAt ? rel.scheduledAt.slice(0, 16) : "",
+                          );
+                        }}
+                      >
+                        <CalendarClock className="h-3.5 w-3.5" />
+                        Schedule
+                      </Button>
+                      <Button
+                        size="sm"
+                        disabled={rel.entryCount === 0 || publishReleaseMut.isPending}
+                        onClick={() => publishReleaseMut.mutate(rel.id)}
+                      >
+                        <Play className="h-3.5 w-3.5" />
+                        Publish now
+                      </Button>
+                    </>
                   )}
                   <Button
                     size="sm"
@@ -627,6 +664,35 @@ export function ReleasesPage() {
           ))}
         </div>
       )}
+
+      <Dialog open={Boolean(rescheduleId)} onOpenChange={(o) => !o && setRescheduleId(null)}>
+        <DialogContent title="Update Release Schedule">
+          <div className="space-y-3 text-xs">
+            <div>
+              <label className="mb-1 block font-medium text-zinc-700">
+                Scheduled Publish Time (leave blank for manual)
+              </label>
+              <Input
+                type="datetime-local"
+                value={rescheduleLocal}
+                onChange={(e) => setRescheduleLocal(e.target.value)}
+              />
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <Button variant="secondary" size="sm" onClick={() => setRescheduleId(null)}>
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                disabled={rescheduleMut.isPending}
+                onClick={() => rescheduleMut.mutate()}
+              >
+                Save schedule
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogContent title="Create Release Group">
@@ -723,6 +789,22 @@ export function WorkflowsPage() {
     },
   });
 
+  const reorderStageMut = useMutation({
+    mutationFn: async ({ idx, dir }: { idx: number; dir: -1 | 1 }) => {
+      const targetIdx = idx + dir;
+      const a = stages[idx];
+      const b = stages[targetIdx];
+      if (!a || !b) return;
+      await Promise.all([
+        api.updateWorkflowStage(a.id, { position: b.position }),
+        api.updateWorkflowStage(b.id, { position: a.position }),
+      ]);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["workflow-stages"] });
+    },
+  });
+
   const deleteStageMut = useMutation({
     mutationFn: (id: string) => api.deleteWorkflowStage(id),
     onSuccess: () => {
@@ -811,20 +893,44 @@ export function WorkflowsPage() {
             key: "actions",
             header: "",
             className: "text-right",
-            render: (s) =>
-              stages.length > 1 && (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => {
-                    if (window.confirm(`Delete stage "${s.name}"?`)) {
-                      deleteStageMut.mutate(s.id);
-                    }
-                  }}
-                >
-                  <Trash2 className="h-3.5 w-3.5 text-rose-600" />
-                </Button>
-              ),
+            render: (s) => {
+              const idx = stages.findIndex((x) => x.id === s.id);
+              return (
+                <div className="inline-flex items-center gap-1">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    title="Move stage up"
+                    disabled={idx <= 0 || reorderStageMut.isPending}
+                    onClick={() => reorderStageMut.mutate({ idx, dir: -1 })}
+                  >
+                    <ArrowUp className="h-3.5 w-3.5" />
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    title="Move stage down"
+                    disabled={idx < 0 || idx >= stages.length - 1 || reorderStageMut.isPending}
+                    onClick={() => reorderStageMut.mutate({ idx, dir: 1 })}
+                  >
+                    <ArrowDown className="h-3.5 w-3.5" />
+                  </Button>
+                  {stages.length > 1 && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => {
+                        if (window.confirm(`Delete stage "${s.name}"?`)) {
+                          deleteStageMut.mutate(s.id);
+                        }
+                      }}
+                    >
+                      <Trash2 className="h-3.5 w-3.5 text-rose-600" />
+                    </Button>
+                  )}
+                </div>
+              );
+            },
           },
         ]}
       />

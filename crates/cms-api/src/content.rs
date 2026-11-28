@@ -208,6 +208,9 @@ async fn rest_create_handler(
         .await?;
     // Strapi v5 REST Content API defaults `POST /api/:plural` to `status=published` unless `?status=draft` is specified
     let target_status = params.status.unwrap_or(DocumentStatus::Published);
+    if schema.draft_and_publish && target_status == DocumentStatus::Published {
+        services.governance.enforce_new_entry_publish_gate().await?;
+    }
 
     let created = services
         .content
@@ -239,6 +242,12 @@ async fn rest_update_handler(
         .resolve_and_validate_locale(schema.i18n_enabled, params.locale.as_deref(), true)
         .await?;
     let target_status = params.status.unwrap_or(DocumentStatus::Published);
+    if schema.draft_and_publish && target_status == DocumentStatus::Published {
+        services
+            .governance
+            .enforce_publish_workflow_gate(&document_id, &locale)
+            .await?;
+    }
 
     let updated = services
         .content
@@ -402,6 +411,9 @@ async fn admin_create_entry_handler(
     } else {
         DocumentStatus::Published
     });
+    if schema.draft_and_publish && target_status == DocumentStatus::Published {
+        services.governance.enforce_new_entry_publish_gate().await?;
+    }
 
     let doc = services
         .content
@@ -538,6 +550,12 @@ async fn admin_update_entry_handler(
     } else {
         DocumentStatus::Published
     });
+    if schema.draft_and_publish && status == DocumentStatus::Published {
+        services
+            .governance
+            .enforce_publish_workflow_gate(&document_id, &locale)
+            .await?;
+    }
 
     let doc = services
         .content

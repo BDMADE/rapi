@@ -23,7 +23,7 @@ use serde::Deserialize;
 use std::convert::Infallible;
 use std::time::Duration;
 
-const AUDIT_BODY_CAPTURE_LIMIT: usize = 64 * 1024; // 64 KB cap for audit payload capture
+const AUDIT_PAYLOAD_STORE_MAX_BYTES: usize = 8 * 1024; // 8 KB stored summary cap in audit_logs
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -526,6 +526,11 @@ async fn admin_add_release_entry_handler(
     Json(input): Json<AddReleaseEntryInput>,
 ) -> Result<Json<ApiResponse<ReleaseDto>>, HttpApiError> {
     enforce_permission(&actor, "admin::releases.update", None)?;
+    enforce_permission(
+        &actor,
+        "plugin::content-manager.explorer.publish",
+        Some(input.content_type_uid.trim()),
+    )?;
     let updated = services.governance.add_release_entry(&id, input).await?;
     Ok(Json(ApiResponse::new(updated)))
 }
@@ -549,6 +554,14 @@ async fn admin_publish_release_handler(
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<ReleaseDto>>, HttpApiError> {
     enforce_permission(&actor, "admin::releases.update", None)?;
+    let release = services.governance.get_release(&id).await?;
+    for entry in &release.entries {
+        enforce_permission(
+            &actor,
+            "plugin::content-manager.explorer.publish",
+            Some(&entry.content_type_uid),
+        )?;
+    }
     let executed = services
         .governance
         .execute_release(&id, actor_id_str(&actor))
@@ -695,12 +708,20 @@ pub async fn audit_log_middleware(
         .is_some_and(|ct| ct.contains("application/json"));
 
     let (parts, body) = req.into_parts();
+    let max_bytes = services.config.max_body_bytes.max(64 * 1024);
     let (rebuilt_req, captured_json) = if is_json {
-        match axum::body::to_bytes(body, AUDIT_BODY_CAPTURE_LIMIT).await {
+        match axum::body::to_bytes(body, max_bytes).await {
             Ok(bytes) => {
-                let parsed = serde_json::from_slice::<serde_json::Value>(&bytes)
-                    .ok()
-                    .map(redact_sensitive_json);
+                let parsed = if bytes.len() <= AUDIT_PAYLOAD_STORE_MAX_BYTES {
+                    serde_json::from_slice::<serde_json::Value>(&bytes)
+                        .ok()
+                        .map(redact_sensitive_json)
+                } else {
+                    Some(serde_json::json!({
+                        "_truncated": true,
+                        "byteLength": bytes.len()
+                    }))
+                };
                 (Request::from_parts(parts, Body::from(bytes)), parsed)
             }
             Err(_) => {

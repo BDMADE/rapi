@@ -1041,6 +1041,17 @@ export const api = {
       })
     ).data,
 
+  updateRelease: async (
+    id: string,
+    payload: { name?: string; scheduledAt?: string | null; timezone?: string },
+  ) =>
+    (
+      await requestJson<ApiResponse<ReleaseDto>>(`/admin/releases/${id}`, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      })
+    ).data,
+
   deleteRelease: async (id: string) =>
     requestJson<ApiResponse<{ deleted: string }>>(`/admin/releases/${id}`, {
       method: "DELETE",

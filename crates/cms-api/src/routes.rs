@@ -2548,4 +2548,241 @@ mod tests {
         assert!(audit_text.contains("[REDACTED]"));
         assert!(!audit_text.contains("SuperSecretPassword123!"));
     }
+
+    #[tokio::test]
+    async fn phase5_security_and_atomicity_regressions() {
+        let app = test_router().await;
+
+        let reg = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/register-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "email": "p5sec@rapi.dev",
+                            "password": "StrongPassword123!",
+                            "firstname": "P5Sec"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let reg_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(reg.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let jwt = reg_json["data"]["token"].as_str().unwrap().to_string();
+
+        // Create content type `api::note.note`
+        let ct = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/content-types")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "uid": "api::note.note",
+                            "kind": "collectionType",
+                            "singularName": "note",
+                            "pluralName": "notes",
+                            "displayName": "Note",
+                            "draftAndPublish": true,
+                            "fields": [
+                                { "name": "title", "fieldType": "string", "required": true },
+                                { "name": "body", "fieldType": "text", "required": false }
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ct.status(), StatusCode::OK);
+
+        // BUG-P5-03: Large (>70 KB) JSON body succeeds through audit_log_middleware without 413
+        let large_text = "x".repeat(75_000);
+        let d1_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/content-manager/api%3A%3Anote.note")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "data": { "title": "Doc 1", "body": large_text } })
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(d1_res.status(), StatusCode::OK);
+        let d1_id = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(d1_res.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap()["data"]["documentId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Create second draft `d2` (missing required `title` so pre-flight will fail!)
+        let d2_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/content-manager/api%3A%3Anote.note")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::json!({ "data": {} }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(d2_res.status(), StatusCode::OK);
+        let d2_id = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(d2_res.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap()["data"]["documentId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // BUG-P5-04: Pre-flight release validation prevents publishing d1 when d2 is invalid!
+        let rel_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/releases")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::json!({ "name": "Atomic Test" }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let rel_id = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(rel_res.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap()["data"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        for did in [&d1_id, &d2_id] {
+            let add = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/admin/releases/{rel_id}/entries"))
+                        .header("authorization", format!("Bearer {jwt}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "contentTypeUid": "api::note.note",
+                                "documentId": did,
+                                "action": "publish"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(add.status(), StatusCode::OK);
+        }
+
+        let fail_pub = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/admin/releases/{rel_id}/publish"))
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fail_pub.status(), StatusCode::BAD_REQUEST);
+
+        // Verify d1 was NOT partially published!
+        let check_d1 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/admin/content-manager/api%3A%3Anote.note/{d1_id}?status=published"
+                    ))
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(check_d1.status(), StatusCode::NOT_FOUND);
+
+        // BUG-P5-01: Enable workflow publish gate -> direct PUT ?status=published & POST ?status=published are blocked!
+        let _ = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/workflows/stages/stage_reviewed")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "requireForPublish": true }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let bypass_put = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!(
+                        "/admin/content-manager/api%3A%3Anote.note/{d1_id}?status=published"
+                    ))
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "data": { "title": "Bypass attempt" } }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bypass_put.status(), StatusCode::BAD_REQUEST);
+
+        let bypass_post = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/content-manager/api%3A%3Anote.note?status=published")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "data": { "title": "Direct publish create" } })
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bypass_post.status(), StatusCode::BAD_REQUEST);
+    }
 }
