@@ -1,49 +1,112 @@
+# RAPI — full stack
+#   cp .env.docker.example .env   # then set JWT_SECRET and REDIS_PASSWORD
+#   docker compose up -d --build
+#
+#   Dashboard : http://localhost:8080
+#   API       : http://localhost:8080/api   (also direct on http://127.0.0.1:1337)
+
+x-hardening: &hardening
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  restart: unless-stopped
+
+x-rapi-env: &rapi-env
+  RAPI_ENV: ${RAPI_ENV:-production}
+  RAPI_HOST: 0.0.0.0
+  RAPI_PORT: 1337
+  RAPI_PUBLIC_URL: ${RAPI_PUBLIC_URL:-http://localhost:8080}
+  CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
+  DATABASE_URL: sqlite:///app/data/rapi.db?mode=rwc
+  UPLOAD_DIR: /app/data/uploads
+  REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379
+  JWT_SECRET: ${JWT_SECRET:?Set a strong 32+ character JWT_SECRET in .env}
+  ENABLE_DOCS: ${ENABLE_DOCS:-false}
+  LOG_FORMAT: ${LOG_FORMAT:-json}
+  RUST_LOG: ${RUST_LOG:-info}
+  SMTP_HOST: ${SMTP_HOST:-}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_USERNAME: ${SMTP_USERNAME:-}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+  SMTP_FROM: ${SMTP_FROM:-}
+
 services:
+  redis:
+    restart: unless-stopped
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # HTTP API (runs migrations on boot). Background jobs are handled by `worker`.
   rapi:
+    <<: *hardening
+    image: hmtanbir/rapi-backend:latest
     build:
       context: .
-      dockerfile: Dockerfile
+      target: runtime
+    command: ["rapi", "serve", "--no-worker"]
+    environment: *rapi-env
     ports:
-      - "127.0.0.1:1337:1337"
-    environment:
-      RAPI_ENV: production
-      RAPI_HOST: 0.0.0.0
-      RAPI_PORT: 1337
-      DATABASE_URL: sqlite:///app/data/rapi.db?mode=rwc
-      REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379
-      JWT_SECRET: ${JWT_SECRET:?Set a strong 32+ character JWT_SECRET in .env}
-      LOG_FORMAT: json
-      ENABLE_DOCS: "false"
+      - "127.0.0.1:${RAPI_API_PORT:-1337}:1337"
     volumes:
       - rapi_data:/app/data
     read_only: true
     tmpfs:
       - /tmp
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
     depends_on:
       redis:
         condition: service_healthy
-
-  redis:
-    image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}"]
-    # Keep Redis internal to the Compose network (do not expose unauthenticated on host 0.0.0.0)
-    volumes:
-      - redis_data:/data
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
-      interval: 5s
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:1337/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+
+  # Dedicated queue consumer: webhooks, media variants, email, scheduled releases.
+  worker:
+    <<: *hardening
+    image: hmtanbir/rapi-backend:latest
+    command: ["rapi", "worker"]
+    environment: *rapi-env
+    volumes:
+      - rapi_data:/app/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    depends_on:
+      rapi:
+        condition: service_healthy
+
+  # React admin dashboard + same-origin reverse proxy to `rapi`.
+  web:
+    <<: *hardening
+    image: hmtanbir/rapi-web:latest
+    build:
+      context: .
+      target: web
+    ports:
+      - "${RAPI_WEB_PORT:-8080}:8080"
+    read_only: true
+    tmpfs:
+      - /tmp
+    depends_on:
+      rapi:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 15s
       timeout: 3s
       retries: 5
-    environment:
-      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
 
 volumes:
   rapi_data:

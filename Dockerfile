@@ -1,4 +1,8 @@
 # syntax=docker/dockerfile:1
+# Multi-target build:
+#   --target web      -> Nginx serving the React admin dashboard (proxies API to backend)
+#   --target runtime  -> `rapi` Rust binary (default)
+
 FROM node:22-bookworm-slim AS web-builder
 WORKDIR /web
 COPY web/package.json web/package-lock.json ./
@@ -13,15 +17,19 @@ COPY crates ./crates
 COPY migrations ./migrations
 RUN cargo build --release --bin rapi
 
+FROM nginxinc/nginx-unprivileged:1.27-alpine AS web
+COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=web-builder /web/dist /usr/share/nginx/html
+EXPOSE 8080
+
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin rapi
 
 WORKDIR /app
 COPY --from=backend-builder /app/target/release/rapi /usr/local/bin/rapi
-COPY --from=web-builder /web/dist /app/web/dist
 COPY config /app/config
 RUN mkdir -p /app/data/uploads && chown -R rapi:rapi /app
 
@@ -32,7 +40,6 @@ ENV RAPI_ENV=production \
     RAPI_PORT=1337 \
     DATABASE_URL=sqlite:///app/data/rapi.db?mode=rwc \
     UPLOAD_DIR=/app/data/uploads \
-    WEB_DIST_DIR=/app/web/dist \
     ENABLE_DOCS=false
 
 EXPOSE 1337
