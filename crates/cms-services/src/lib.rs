@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod container;
 pub mod content;
+pub mod extensibility;
 pub mod governance;
 pub mod integrations;
 pub mod media;
@@ -14,6 +15,11 @@ pub use auth::{
 pub use container::ServiceContainer;
 pub use content::ContentService;
 pub use cms_db::InsertAuditLogInput;
+pub use extensibility::{
+    AiCompletionInput, CreateSsoProviderInput, ExtensibilityService, InstallCustomWasmInput,
+    InvokePluginInput, RegisterCustomFieldInput, SsoAuthorizeUrlDto, SsoCallbackInput,
+    UpdateAiSettingsInput, UpdatePluginInput, UpdateSsoProviderInput,
+};
 pub use governance::{
     AddReleaseEntryInput, CreateLocaleInput, CreateReleaseInput, CreateWorkflowStageInput,
     GovernanceService, UpdateLocaleInput, UpdateReleaseInput, UpdateWorkflowStageInput,

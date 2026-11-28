@@ -11,8 +11,8 @@ use std::time::Duration;
 const SCHEMA_CACHE_ALL_KEY: &str = "rapi:schema:__all__";
 const SCHEMA_CACHE_TTL_SECS: u64 = 300;
 const RESERVED_API_SLUGS: &[&str] = &[
-    "auth", "upload", "users", "files", "folders", "graphql", "admin", "health", "ready", "docs",
-    "openapi",
+    "auth", "upload", "users", "files", "folders", "graphql", "mcp", "admin", "health", "ready",
+    "docs", "openapi",
 ];
 
 #[derive(Clone)]
@@ -81,6 +81,7 @@ impl SchemaService {
 
     pub async fn create_schema(&self, mut schema: ContentTypeSchema) -> ApiResult<ContentTypeSchema> {
         normalize_and_validate_schema(&mut schema)?;
+        self.validate_custom_field_references(&schema).await?;
         let existing_all = self.engine.list_schemas().await?;
         check_api_slug_collisions(&schema, &existing_all, true)?;
         validate_cross_schema_references(&schema, &existing_all)?;
@@ -98,6 +99,7 @@ impl SchemaService {
     ) -> ApiResult<ContentTypeSchema> {
         schema.uid = uid.to_string();
         normalize_and_validate_schema(&mut schema)?;
+        self.validate_custom_field_references(&schema).await?;
         let existing_all = self.engine.list_schemas().await?;
         check_api_slug_collisions(&schema, &existing_all, false)?;
         validate_cross_schema_references(&schema, &existing_all)?;
@@ -106,6 +108,24 @@ impl SchemaService {
         let updated = self.engine.update_schema(&schema).await?;
         self.invalidate_schema(uid).await;
         Ok(updated)
+    }
+
+    async fn validate_custom_field_references(&self, schema: &ContentTypeSchema) -> ApiResult<()> {
+        for f in &schema.fields {
+            if f.field_type == FieldType::Custom {
+                let cf_uid = f.custom_field_uid.as_deref().unwrap_or("").trim();
+                if !self.engine.custom_field_exists(cf_uid).await? {
+                    return Err(ApiError::Validation {
+                        message: format!(
+                            "Field '{}' references unregistered customFieldUid '{cf_uid}'",
+                            f.name
+                        ),
+                        details: serde_json::json!({ "field": f.name, "customFieldUid": cf_uid }),
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 
     pub async fn delete_schema(&self, uid: &str) -> ApiResult<()> {
@@ -349,6 +369,21 @@ fn normalize_and_validate_schema(schema: &mut ContentTypeSchema) -> ApiResult<()
                         });
                     }
                 }
+            }
+            FieldType::Custom
+                if f.custom_field_uid
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or("")
+                    .is_empty() =>
+            {
+                return Err(ApiError::Validation {
+                    message: format!(
+                        "Custom field '{}' requires a registered customFieldUid",
+                        f.name
+                    ),
+                    details: serde_json::json!({ "field": f.name }),
+                });
             }
             _ => {}
         }

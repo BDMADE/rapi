@@ -189,6 +189,79 @@ impl AuthService {
         self.issue_admin_session(user, user_agent, ip).await
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn complete_sso_admin_login(
+        &self,
+        email: &str,
+        firstname: &str,
+        lastname: &str,
+        default_role_id: &str,
+        auto_provision: bool,
+        user_agent: Option<&str>,
+        ip: Option<&str>,
+    ) -> ApiResult<AuthTokenResponse> {
+        let normalized_email = email.trim().to_lowercase();
+        validate_email(&normalized_email)?;
+
+        if let Some(rec) = self
+            .repo
+            .find_admin_record_by_email(&normalized_email)
+            .await?
+        {
+            if !rec.is_active {
+                return Err(ApiError::Forbidden(
+                    "Administrator account is deactivated".to_string(),
+                ));
+            }
+            let _ = self.repo.touch_last_login(&rec.id).await;
+            let user = self
+                .repo
+                .find_admin_dto_by_id(&rec.id)
+                .await?
+                .ok_or_else(|| ApiError::Unauthorized("Administrator not found".to_string()))?;
+            return self.issue_admin_session(user, user_agent, ip).await;
+        }
+
+        if !auto_provision {
+            return Err(ApiError::Forbidden(
+                "SSO auto-provisioning is disabled and no matching administrator exists".to_string(),
+            ));
+        }
+
+        let clean_first = {
+            let t = firstname.trim();
+            if t.is_empty() {
+                normalized_email
+                    .split('@')
+                    .next()
+                    .unwrap_or("Admin")
+                    .to_string()
+            } else {
+                t.to_string()
+            }
+        };
+        let clean_last = lastname.trim();
+        let random_pw = format!("sso_{}_{}", random_hex_32(), random_hex_32());
+        let pw_hash = hash_password(&random_pw)?;
+        let is_super_admin = default_role_id == "role_super_admin";
+
+        let user = self
+            .repo
+            .create_admin_user(
+                &normalized_email,
+                None,
+                &pw_hash,
+                &clean_first,
+                clean_last,
+                true,
+                is_super_admin,
+                &[default_role_id.to_string()],
+            )
+            .await?;
+        let _ = self.repo.touch_last_login(&user.id).await;
+        self.issue_admin_session(user, user_agent, ip).await
+    }
+
     pub async fn refresh_admin_token(
         &self,
         refresh_token: &str,

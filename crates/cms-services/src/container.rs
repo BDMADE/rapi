@@ -1,5 +1,6 @@
 use crate::auth::AuthService;
 use crate::content::ContentService;
+use crate::extensibility::ExtensibilityService;
 use crate::governance::GovernanceService;
 use crate::integrations::IntegrationsService;
 use crate::media::MediaService;
@@ -10,8 +11,9 @@ use cms_core::{
     LocalPubSubBackend, PubSubBackend, QueueBackend,
 };
 use cms_db::{
-    AuthRepository, DbPools, DynamicRepository, GovernanceRepository, IntegrationsRepository,
-    MediaRepository, PlatformRepository, RedisRuntime, SchemaEngine, SqliteQueueBackend,
+    AuthRepository, DbPools, DynamicRepository, ExtensibilityRepository, GovernanceRepository,
+    IntegrationsRepository, MediaRepository, PlatformRepository, RedisRuntime, SchemaEngine,
+    SqliteQueueBackend,
 };
 use cms_plugin_api::PluginRegistry;
 use std::sync::Arc;
@@ -33,6 +35,7 @@ pub struct ServiceContainer {
     pub media: MediaService,
     pub governance: GovernanceService,
     pub integrations: IntegrationsService,
+    pub extensibility: ExtensibilityService,
     pub started_at: Instant,
 }
 
@@ -102,6 +105,20 @@ impl ServiceContainer {
             governance.clone(),
             queue.clone(),
         );
+        let ext_repo = ExtensibilityRepository::new(db.clone());
+        let extensibility = ExtensibilityService::new(
+            ext_repo,
+            config.clone(),
+            plugins.clone(),
+            cache.clone(),
+            auth.clone(),
+            schema.clone(),
+            content.clone(),
+            media.clone(),
+            governance.clone(),
+            integrations.clone(),
+        );
+        extensibility.sync_native_plugins().await?;
 
         Ok(Self {
             config,
@@ -117,6 +134,7 @@ impl ServiceContainer {
             media,
             governance,
             integrations,
+            extensibility,
             started_at,
         })
     }

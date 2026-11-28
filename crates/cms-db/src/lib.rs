@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod content_repo;
+pub mod extensibility_repo;
 pub mod governance_repo;
 pub mod integrations_repo;
 pub mod media_repo;
@@ -11,6 +12,9 @@ pub mod stats;
 
 pub use auth::{AdminUserRecord, AuthRepository, SessionRecord};
 pub use content_repo::DynamicRepository;
+pub use extensibility_repo::{
+    AiSettingsRecord, ExtensibilityRepository, PluginRowRecord, SsoProviderRecord,
+};
 pub use governance_repo::{GovernanceRepository, InsertAuditLogInput};
 pub use integrations_repo::{
     EndUserRecord, IntegrationsRepository, RecordEmailOutboxInput, RecordWebhookDeliveryInput,

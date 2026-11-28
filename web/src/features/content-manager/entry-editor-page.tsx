@@ -46,6 +46,7 @@ import {
   api,
   type ContentTypeSchema,
   type ContentVersionDto,
+  type CustomFieldDto,
   type FieldDefinition,
 } from "@/lib/api";
 
@@ -95,6 +96,132 @@ function JsonFieldEditor({
       {parseError && <p className="mt-1 text-[11px] text-rose-600">{parseError}</p>}
     </div>
   );
+}
+
+function CustomFieldWidget({
+  customFieldUid,
+  customField,
+  value,
+  onChange,
+}: {
+  customFieldUid?: string;
+  customField?: CustomFieldDto;
+  value: unknown;
+  onChange: (val: unknown) => void;
+}) {
+  const widgetOpt =
+    typeof customField?.options?.widget === "string" ? customField.options.widget : undefined;
+  const resolvedWidget =
+    widgetOpt ??
+    (customFieldUid === "global::color-picker"
+      ? "color"
+      : customFieldUid === "global::slug-seo"
+        ? "seo-slug"
+        : customFieldUid === "global::code-editor"
+          ? "code"
+          : customFieldUid === "global::key-value"
+            ? "key-value"
+            : "json");
+
+  if (resolvedWidget === "color") {
+    const hex = typeof value === "string" && /^#[0-9a-fA-F]{6}$/.test(value) ? value : "#4f46e5";
+    return (
+      <div className="flex items-center gap-2.5">
+        <input
+          type="color"
+          value={hex}
+          onChange={(e) => onChange(e.target.value)}
+          className="h-8 w-10 cursor-pointer rounded border border-zinc-300 bg-white p-0.5"
+        />
+        <Input
+          value={typeof value === "string" ? value : hex}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder="#4f46e5"
+          className="font-mono"
+        />
+      </div>
+    );
+  }
+
+  if (resolvedWidget === "seo-slug") {
+    return (
+      <Input
+        value={typeof value === "string" ? value : ""}
+        onChange={(e) => onChange(slugifyUid(e.target.value))}
+        placeholder="seo-friendly-url-slug"
+        className="font-mono"
+      />
+    );
+  }
+
+  if (resolvedWidget === "code") {
+    return (
+      <textarea
+        rows={5}
+        value={typeof value === "string" ? value : ""}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder="// Enter code snippet..."
+        className="w-full rounded-md border border-zinc-300 bg-zinc-950 p-2.5 font-mono text-xs text-emerald-300 focus:border-indigo-600 focus:outline-none"
+      />
+    );
+  }
+
+  if (resolvedWidget === "key-value") {
+    const obj: Record<string, string> =
+      value && typeof value === "object" && !Array.isArray(value)
+        ? (value as Record<string, string>)
+        : {};
+    const entries = Object.entries(obj);
+    return (
+      <div className="space-y-2 rounded-md border border-zinc-200 bg-zinc-50 p-2.5">
+        {entries.map(([k, v], idx) => (
+          <div key={`${idx}-${k}`} className="flex items-center gap-2">
+            <Input
+              value={k}
+              placeholder="key"
+              className="font-mono"
+              onChange={(e) => {
+                const next: Record<string, string> = {};
+                entries.forEach(([ek, ev], i) => {
+                  next[i === idx ? e.target.value : ek] = ev;
+                });
+                onChange(next);
+              }}
+            />
+            <Input
+              value={String(v ?? "")}
+              placeholder="value"
+              onChange={(e) => {
+                onChange({ ...obj, [k]: e.target.value });
+              }}
+            />
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                const copy = { ...obj };
+                delete copy[k];
+                onChange(copy);
+              }}
+            >
+              <Trash2 className="h-3.5 w-3.5 text-zinc-400 hover:text-rose-600" />
+            </Button>
+          </div>
+        ))}
+        <Button
+          type="button"
+          size="sm"
+          variant="secondary"
+          onClick={() => onChange({ ...obj, [`key_${entries.length + 1}`]: "" })}
+        >
+          + Add pair
+        </Button>
+      </div>
+    );
+  }
+
+  return <JsonFieldEditor value={value} onChange={onChange} />;
 }
 
 function slugifyUid(input: string): string {
@@ -201,7 +328,31 @@ export function EntryEditorPage() {
     enabled: Boolean(resolvedDocId),
   });
 
+  const aiSettingsQuery = useQuery({
+    queryKey: ["ai-settings"],
+    queryFn: api.getAiSettings,
+  });
+
+  const customFieldsQuery = useQuery({
+    queryKey: ["custom-fields"],
+    queryFn: api.listCustomFields,
+  });
+
+  const customFieldsByUid = useMemo(() => {
+    const map = new Map<string, CustomFieldDto>();
+    for (const cf of customFieldsQuery.data ?? []) {
+      map.set(cf.uid, cf);
+    }
+    return map;
+  }, [customFieldsQuery.data]);
+
   const [formValues, setFormValues] = useState<Record<string, unknown>>({});
+  const [aiDialogOpen, setAiDialogOpen] = useState(false);
+  const [aiTask, setAiTask] = useState<"translate" | "generate_draft" | "seo_summary">(
+    "generate_draft",
+  );
+  const [aiTargetField, setAiTargetField] = useState("");
+  const [aiPrompt, setAiPrompt] = useState("");
   const [copiedId, setCopiedId] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -402,6 +553,35 @@ export function EntryEditorPage() {
       pushToast({ title: "Release error", description: e.message, tone: "error" }),
   });
 
+  const aiAssistMut = useMutation({
+    mutationFn: () =>
+      api.completeAiTask({
+        task: aiTask,
+        content: aiPrompt,
+        targetLocale: activeLocale,
+      }),
+    onSuccess: (out) => {
+      const target =
+        aiTargetField ||
+        schema?.fields.find((f) =>
+          ["richtext", "text", "string"].includes(f.fieldType),
+        )?.name;
+      const textVal =
+        (out.result.translatedText as string | undefined) ??
+        (out.result.body as string | undefined) ??
+        (out.result.metaDescription as string | undefined) ??
+        (out.result.text as string | undefined) ??
+        JSON.stringify(out.result);
+      if (target) {
+        setField(target, textVal);
+      }
+      setAiDialogOpen(false);
+      pushToast({ title: `Applied AI output to '${target ?? "editor"}'`, tone: "success" });
+    },
+    onError: (e: Error) =>
+      pushToast({ title: "AI Assist error", description: e.message, tone: "error" }),
+  });
+
   const handleTogglePreview = async () => {
     if (!uid || !resolvedDocId) return;
     if (previewOpen) {
@@ -480,6 +660,28 @@ export function EntryEditorPage() {
         </div>
 
         <div className="flex items-center gap-2">
+          {aiSettingsQuery.data?.isEnabled && (
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => {
+                const defaultField =
+                  schema.fields.find((f) =>
+                    ["richtext", "text", "string"].includes(f.fieldType),
+                  )?.name ?? "";
+                setAiTargetField(defaultField);
+                setAiPrompt(
+                  defaultField && typeof formValues[defaultField] === "string"
+                    ? (formValues[defaultField] as string)
+                    : schema.displayName,
+                );
+                setAiDialogOpen(true);
+              }}
+            >
+              <Sparkles className="h-3.5 w-3.5 text-indigo-700" />
+              AI Assist
+            </Button>
+          )}
           {resolvedDocId && entryQuery.data && (
             <Button
               size="sm"
@@ -547,6 +749,7 @@ export function EntryEditorPage() {
                     locale={activeLocale}
                     componentsByUid={componentsByUid}
                     contentTypesByUid={contentTypesByUid}
+                    customFieldsByUid={customFieldsByUid}
                     onChange={(val) => setField(field.name, val)}
                   />
                 ))
@@ -875,6 +1078,64 @@ export function EntryEditorPage() {
       </div>
 
       {/* Snapshot Diff Dialog */}
+      <Dialog open={aiDialogOpen} onOpenChange={setAiDialogOpen}>
+        <DialogContent
+          title="AI Editorial Assistant"
+          description="Generate copy, translate into the active locale, or synthesize SEO metadata."
+        >
+          <div className="space-y-3 text-xs">
+            <div className="grid grid-cols-2 gap-2.5">
+              <div>
+                <label className="mb-1 block font-medium text-zinc-700">Task</label>
+                <Select
+                  value={aiTask}
+                  onValueChange={(v) =>
+                    setAiTask(v as "translate" | "generate_draft" | "seo_summary")
+                  }
+                  options={[
+                    { value: "generate_draft", label: "Generate draft copy" },
+                    { value: "translate", label: `Translate to '${activeLocale}'` },
+                    { value: "seo_summary", label: "SEO summary" },
+                  ]}
+                />
+              </div>
+              <div>
+                <label className="mb-1 block font-medium text-zinc-700">Apply to field</label>
+                <Select
+                  value={aiTargetField}
+                  onValueChange={setAiTargetField}
+                  options={schema.fields
+                    .filter((f) => ["string", "text", "richtext"].includes(f.fieldType))
+                    .map((f) => ({ value: f.name, label: f.name }))}
+                />
+              </div>
+            </div>
+            <div>
+              <label className="mb-1 block font-medium text-zinc-700">Prompt / Source text</label>
+              <textarea
+                rows={3}
+                value={aiPrompt}
+                onChange={(e) => setAiPrompt(e.target.value)}
+                className="w-full rounded-md border border-zinc-300 p-2 text-xs"
+              />
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button variant="secondary" size="sm" onClick={() => setAiDialogOpen(false)}>
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                disabled={!aiPrompt.trim() || aiAssistMut.isPending}
+                onClick={() => aiAssistMut.mutate()}
+              >
+                <Sparkles className="h-3.5 w-3.5" />
+                {aiAssistMut.isPending ? "Running..." : "Apply to field"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={Boolean(diffVersion)} onOpenChange={(o) => !o && setDiffVersion(null)}>
         <DialogContent
           title={diffVersion ? `Snapshot Diff · v${diffVersion.version} vs Current` : "Diff"}
@@ -945,6 +1206,7 @@ function FieldRenderer({
   locale,
   componentsByUid,
   contentTypesByUid,
+  customFieldsByUid,
   onChange,
 }: {
   field: FieldDefinition;
@@ -953,6 +1215,7 @@ function FieldRenderer({
   locale: string;
   componentsByUid: Map<string, ContentTypeSchema>;
   contentTypesByUid: Map<string, ContentTypeSchema>;
+  customFieldsByUid: Map<string, CustomFieldDto>;
   onChange: (val: unknown) => void;
 }) {
   const labelRow = (
@@ -1091,11 +1354,34 @@ function FieldRenderer({
       );
 
     case "json":
-    case "custom":
       return (
         <div>
           {labelRow}
           <JsonFieldEditor value={value} onChange={onChange} />
+        </div>
+      );
+
+    case "custom":
+      return (
+        <div>
+          <div className="mb-1 flex items-center justify-between">
+            <label className="text-xs font-medium text-zinc-800">
+              {field.name}
+              {field.required && <span className="ml-0.5 text-rose-600">*</span>}
+            </label>
+            <div className="flex items-center gap-1">
+              <Badge tone="indigo">{field.customFieldUid ?? "custom"}</Badge>
+              {field.localized && <Badge tone="neutral">{locale}</Badge>}
+            </div>
+          </div>
+          <CustomFieldWidget
+            customFieldUid={field.customFieldUid}
+            customField={
+              field.customFieldUid ? customFieldsByUid.get(field.customFieldUid) : undefined
+            }
+            value={value}
+            onChange={onChange}
+          />
         </div>
       );
 
